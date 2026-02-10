@@ -1,4 +1,10 @@
 // 平台特定 API
+import {
+  SelectImageFile,
+  SelectFile,
+  AutoSelectCover,
+  UploadThumbnail
+} from '../../wailsjs/go/app/App'
 
 // 获取用户合集列表（视频号）
 export async function getCollections(platform: string): Promise<{ label: string; value: string }[]> {
@@ -12,14 +18,37 @@ export async function getCollections(platform: string): Promise<{ label: string;
   }
 }
 
-// 自动选择推荐封面（抖音）
+// 自动选择推荐封面（从视频第一帧提取）
 export async function autoSelectCover(videoId: number): Promise<{ thumbnailPath: string }> {
   try {
-    // TODO: 实现自动选择推荐封面功能
-    console.log('自动选择封面:', videoId)
-    return { thumbnailPath: '' }
+    const result = await AutoSelectCover(videoId)
+    return { thumbnailPath: result.thumbnailPath }
   } catch (error) {
     console.error('自动选择封面失败:', error)
+    throw error
+  }
+}
+
+// 选择图片文件并保存为封面
+// 先选择文件，然后上传到存储目录，返回可访问的 URL
+export async function selectImageFile(videoId?: number): Promise<string> {
+  try {
+    // 1. 选择图片文件
+    const sourcePath = await SelectImageFile()
+    if (!sourcePath) {
+      return ''
+    }
+
+    // 2. 如果有 videoId，保存到存储目录并返回 URL
+    if (videoId) {
+      const result = await UploadThumbnail(videoId, sourcePath)
+      return result.thumbnailPath
+    }
+
+    // 3. 没有 videoId，直接返回原始路径（可能无法访问）
+    return sourcePath
+  } catch (error) {
+    console.error('选择图片失败:', error)
     throw error
   }
 }
@@ -36,24 +65,11 @@ export async function validateProductLink(link: string): Promise<{ valid: boolea
   }
 }
 
-// 选择图片文件
-export async function selectImageFile(): Promise<string> {
-  try {
-    // TODO: 实现选择图片文件功能
-    console.log('选择图片文件')
-    return ''
-  } catch (error) {
-    console.error('选择图片失败:', error)
-    throw error
-  }
-}
-
 // 选择文件
 export async function selectFile(accept?: string): Promise<string> {
   try {
-    // TODO: 实现选择文件功能
-    console.log('选择文件:', accept)
-    return ''
+    const result = await SelectFile(accept || '')
+    return result || ''
   } catch (error) {
     console.error('选择文件失败:', error)
     throw error

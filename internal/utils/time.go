@@ -99,7 +99,7 @@ func GetScheduleDelay(timeStr string) (time.Duration, error) {
 		return 0, err
 	}
 
-	delay := t.Sub(time.Now())
+	delay := time.Until(t)
 	if delay < 0 {
 		return 0, fmt.Errorf("定时时间已过期")
 	}

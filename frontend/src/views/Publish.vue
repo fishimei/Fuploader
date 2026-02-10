@@ -74,6 +74,13 @@ const selectedVideoDescription = computed(() => {
   return video?.description || ''
 })
 
+// 获取当前选中视频的封面
+const selectedVideoThumbnail = computed(() => {
+  if (!selectedVideo.value) return ''
+  const video = videoStore.videos.find(v => v.id === selectedVideo.value)
+  return video?.thumbnail || ''
+})
+
 // 同步视频标签到平台表单
 function syncVideoTagsToPlatform(platform: PlatformType) {
   const fields = getPlatformFields(platform)
@@ -99,6 +106,28 @@ function syncVideoTagsToPlatform(platform: PlatformType) {
   const currentTags = platformForms.value[platform]?.tags
   if (!currentTags || currentTags.length === 0) {
     platformForms.value[platform].tags = syncTags
+  }
+}
+
+// 同步视频封面到平台表单
+function syncVideoThumbnailToPlatform(platform: PlatformType) {
+  const fields = getPlatformFields(platform)
+  const hasThumbnailField = fields.some(f => f.key === 'thumbnail' && f.type === 'image')
+
+  if (!hasThumbnailField) return
+
+  const thumbnail = selectedVideoThumbnail.value
+  if (!thumbnail) return
+
+  // 设置到平台表单
+  if (!platformForms.value[platform]) {
+    platformForms.value[platform] = {}
+  }
+
+  // 只有当封面字段为空时才同步（避免覆盖用户手动设置的封面）
+  const currentThumbnail = platformForms.value[platform]?.thumbnail
+  if (!currentThumbnail) {
+    platformForms.value[platform].thumbnail = thumbnail
   }
 }
 
@@ -148,7 +177,7 @@ watch(selectedPlatforms, (platforms) => {
   })
 }, { immediate: true })
 
-// 监听选中的视频变化，自动同步标题、描述和标签到各平台
+// 监听选中的视频变化，自动同步标题、描述、标签和封面到各平台
 watch(selectedVideo, (newVideoId) => {
   if (!newVideoId) return
 
@@ -168,15 +197,21 @@ watch(selectedVideo, (newVideoId) => {
     selectedPlatforms.value.forEach(platform => {
       syncVideoTagsToPlatform(platform)
     })
+
+    // 同步封面到各平台
+    selectedPlatforms.value.forEach(platform => {
+      syncVideoThumbnailToPlatform(platform)
+    })
   })
 })
 
-// 监听平台选择变化，同步标签到新选择的平台
+// 监听平台选择变化，同步标签和封面到新选择的平台
 watch(selectedPlatforms, (platforms, oldPlatforms) => {
   const oldPlatformsList = oldPlatforms || []
   const newPlatforms = platforms.filter(p => !oldPlatformsList.includes(p))
   newPlatforms.forEach(platform => {
     syncVideoTagsToPlatform(platform)
+    syncVideoThumbnailToPlatform(platform)
   })
 })
 
@@ -329,17 +364,24 @@ watch(() => commonForm.value.title, (newTitle) => {
 // 图片选择处理
 // ============================================
 async function handleSelectImage(platform: string, fieldKey: string) {
+  if (!selectedVideo.value) {
+    ElMessage.warning('请先选择视频')
+    return
+  }
+
   try {
-    // 调用后端API选择图片文件
-    const result = await taskStore.selectImageFile()
+    // 调用后端API选择图片文件并保存到存储目录
+    const result = await taskStore.selectImageFile(selectedVideo.value)
     if (result) {
       if (!platformForms.value[platform]) {
         platformForms.value[platform] = {}
       }
       platformForms.value[platform][fieldKey] = result
+      ElMessage.success('封面上传成功')
     }
   } catch (error) {
     console.error('选择图片失败:', error)
+    ElMessage.error('封面上传失败')
   }
 }
 

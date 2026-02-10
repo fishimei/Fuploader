@@ -2,6 +2,7 @@ package utils
 
 import (
 	"Fuploader/internal/config"
+	"Fuploader/internal/types"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +14,7 @@ import (
 
 // LogServiceInterface 日志服务接口（避免循环依赖）
 type LogServiceInterface interface {
-	Add(message string)
+	Add(log types.SimpleLog)
 }
 
 type Logger struct {
@@ -48,9 +49,17 @@ func SetLogService(service LogServiceInterface) {
 	GetLogger().logService = service
 }
 
-func (l *Logger) log(level string, msg string) {
+// log 内部日志记录方法
+func (l *Logger) log(level types.LogLevel, platform, msg string) {
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	line := fmt.Sprintf("[%s] [%s] %s\n", timestamp, level, msg)
+	
+	// 构建文件日志行
+	var line string
+	if platform != "" {
+		line = fmt.Sprintf("[%s] [%s] [%s] %s\n", timestamp, level, platform, msg)
+	} else {
+		line = fmt.Sprintf("[%s] [%s] %s\n", timestamp, level, msg)
+	}
 
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
@@ -60,29 +69,61 @@ func (l *Logger) log(level string, msg string) {
 
 	// 同时输出到前端
 	if l.logService != nil {
-		l.logService.Add(fmt.Sprintf("[%s] %s", level, msg))
+		l.logService.Add(types.SimpleLog{
+			Date:     time.Now().Format("2006/1/2"),
+			Time:     time.Now().Format("15:04:05"),
+			Message:  msg,
+			Platform: platform,
+			Level:    level,
+		})
 	}
 }
 
+// ========== 基础日志函数（不带平台）==========
+
 func (l *Logger) Info(msg string) {
-	l.log("INFO", msg)
+	l.log(types.LogLevelInfo, "", msg)
 }
 
 func (l *Logger) Error(msg string) {
-	l.log("ERROR", msg)
+	l.log(types.LogLevelError, "", msg)
 }
 
 func (l *Logger) Warn(msg string) {
-	l.log("WARN", msg)
+	l.log(types.LogLevelWarn, "", msg)
 }
 
 func (l *Logger) Debug(msg string) {
-	l.log("DEBUG", msg)
+	l.log(types.LogLevelDebug, "", msg)
 }
 
 func (l *Logger) Success(msg string) {
-	l.log("SUCCESS", msg)
+	l.log(types.LogLevelSuccess, "", msg)
 }
+
+// ========== 带平台的日志函数 ==========
+
+func (l *Logger) InfoWithPlatform(platform, msg string) {
+	l.log(types.LogLevelInfo, platform, msg)
+}
+
+func (l *Logger) ErrorWithPlatform(platform, msg string) {
+	l.log(types.LogLevelError, platform, msg)
+}
+
+func (l *Logger) WarnWithPlatform(platform, msg string) {
+	l.log(types.LogLevelWarn, platform, msg)
+}
+
+func (l *Logger) DebugWithPlatform(platform, msg string) {
+	l.log(types.LogLevelDebug, platform, msg)
+}
+
+func (l *Logger) SuccessWithPlatform(platform, msg string) {
+	l.log(types.LogLevelSuccess, platform, msg)
+}
+
+// ========== 全局便捷函数（不带平台）==========
 
 func Info(msg string) {
 	GetLogger().Info(msg)
@@ -102,6 +143,28 @@ func Debug(msg string) {
 
 func Success(msg string) {
 	GetLogger().Success(msg)
+}
+
+// ========== 全局便捷函数（带平台）==========
+
+func InfoWithPlatform(platform, msg string) {
+	GetLogger().InfoWithPlatform(platform, msg)
+}
+
+func ErrorWithPlatform(platform, msg string) {
+	GetLogger().ErrorWithPlatform(platform, msg)
+}
+
+func WarnWithPlatform(platform, msg string) {
+	GetLogger().WarnWithPlatform(platform, msg)
+}
+
+func DebugWithPlatform(platform, msg string) {
+	GetLogger().DebugWithPlatform(platform, msg)
+}
+
+func SuccessWithPlatform(platform, msg string) {
+	GetLogger().SuccessWithPlatform(platform, msg)
 }
 
 // Screenshot 截图并保存到日志目录

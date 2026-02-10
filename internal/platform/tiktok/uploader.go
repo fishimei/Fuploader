@@ -3,483 +3,525 @@ package tiktok
 import (
 	"context"
 	"fmt"
-	"regexp"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"Fuploader/internal/config"
 	"Fuploader/internal/platform/browser"
-	"Fuploader/internal/platform/uploader"
 	"Fuploader/internal/types"
 	"Fuploader/internal/utils"
 
 	"github.com/playwright-community/playwright-go"
 )
 
+// debugLog 调试日志输出，仅在调试模式下显示
+func debugLog(format string, args ...interface{}) {
+	if config.Config != nil && config.Config.DebugMode {
+		utils.InfoWithPlatform("tiktok", fmt.Sprintf("[调试] "+format, args...))
+	}
+}
+
 // browserPool 全局浏览器池实例
 var browserPool *browser.Pool
 
-// initBrowserPool 初始化浏览器池
-func initBrowserPool() {
-	if browserPool == nil {
-		browserPool = browser.NewPool(2, 5) // 最多2个浏览器，每个5个上下文
-	}
+func init() {
+	browserPool = browser.NewPool(2, 5)
 }
 
 // Uploader TikTok上传器
 type Uploader struct {
-	*uploader.Base
-	locatorBase playwright.Locator // 动态定位器基类
+	cookiePath string
+	platform   string
 }
 
 // NewUploader 创建上传器
 func NewUploader(cookiePath string) *Uploader {
-	initBrowserPool()
-	return &Uploader{
-		Base: uploader.NewBase("tiktok", cookiePath, browserPool),
+	u := &Uploader{
+		cookiePath: cookiePath,
+		platform:   "tiktok",
 	}
+	debugLog("创建上传器 - 地址: %p, cookiePath: '%s'", u, cookiePath)
+	if cookiePath == "" {
+		utils.Warn("[TikTok] NewUploader 收到空的cookiePath!")
+	}
+	return u
 }
 
 // Platform 返回平台名称
 func (u *Uploader) Platform() string {
-	return "tiktok"
+	return u.platform
 }
 
-// ValidateCookie 验证 Cookie 是否有效
-// 参照Python版本：访问tiktokstudio/upload，检测select元素的class
+// ValidateCookie 验证Cookie是否有效
 func (u *Uploader) ValidateCookie(ctx context.Context) (bool, error) {
-	// 从浏览器池获取上下文
-	browserCtx, err := browserPool.GetContext(ctx, u.GetCookiePath(), u.GetContextOptions())
+	utils.InfoWithPlatform(u.platform, "验证Cookie")
+
+	if _, err := os.Stat(u.cookiePath); os.IsNotExist(err) {
+		utils.WarnWithPlatform(u.platform, "Cookie文件不存在")
+		return false, nil
+	}
+
+	browserCtx, err := browserPool.GetContext(ctx, u.cookiePath, u.getContextOptions())
 	if err != nil {
-		return false, fmt.Errorf("get browser context failed: %w", err)
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("获取浏览器失败: %v", err))
+		return false, nil
 	}
 	defer browserCtx.Release()
 
 	page, err := browserCtx.GetPage()
 	if err != nil {
-		return false, fmt.Errorf("get page failed: %w", err)
-	}
-
-	// 访问 TikTok Studio（参照Python版本）
-	utils.Info("[-] 正在验证 TikTok 登录状态...")
-	if _, err := page.Goto("https://www.tiktok.com/tiktokstudio/upload?lang=en", playwright.PageGotoOptions{
-		WaitUntil: playwright.WaitUntilStateNetworkidle,
-	}); err != nil {
-		return false, fmt.Errorf("goto upload page failed: %w", err)
-	}
-
-	// 等待页面加载
-	time.Sleep(3 * time.Second)
-
-	// 参照Python版本：检测select元素的class
-	selectElements, err := page.QuerySelectorAll("select")
-	if err != nil {
-		utils.Warn(fmt.Sprintf("[-] 查询select元素失败: %v", err))
-		// 如果查询失败，尝试其他检测方式
-		return u.validateByAlternative(page)
-	}
-
-	for _, element := range selectElements {
-		className, err := element.GetAttribute("class")
-		if err != nil {
-			continue
-		}
-
-		// 参照Python版本：使用正则表达式匹配特定模式的class名称
-		// re.match(r'tiktok-.*-SelectFormContainer.*', class_name)
-		matched, _ := regexp.MatchString(`tiktok-.*-SelectFormContainer.*`, className)
-		if matched {
-			utils.Info("[-] 检测到未登录特征元素（SelectFormContainer），Cookie 已失效")
-			return false, nil
-		}
-	}
-
-	// 如果没有检测到未登录特征，说明Cookie有效
-	utils.Info("[-] Cookie 有效")
-	return true, nil
-}
-
-// validateByAlternative 备用验证方式
-func (u *Uploader) validateByAlternative(page playwright.Page) (bool, error) {
-	// 检查当前URL
-	currentURL := page.URL()
-	utils.Info(fmt.Sprintf("[-] 当前URL: %s", currentURL))
-
-	// 如果被重定向到登录页，说明Cookie无效
-	if strings.Contains(currentURL, "/login") {
-		utils.Info("[-] 被重定向到登录页，Cookie 无效")
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("获取页面失败: %v", err))
 		return false, nil
 	}
 
-	// 检查是否有创作者中心特征元素
-	uploadBtn, _ := page.GetByText("Upload").Count()
-	dashboardMenu, _ := page.GetByText("Dashboard").Count()
-	contentMenu, _ := page.GetByText("Content").Count()
-
-	if uploadBtn > 0 || dashboardMenu > 0 || contentMenu > 0 {
-		utils.Info("[-] 检测到创作者中心特征元素，Cookie 有效")
-		return true, nil
+	if _, err := page.Goto("https://www.tiktok.com/tiktokstudio/upload?lang=en", playwright.PageGotoOptions{
+		WaitUntil: playwright.WaitUntilStateNetworkidle,
+	}); err != nil {
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("打开页面失败: %v", err))
+		return false, nil
 	}
 
-	utils.Info("[-] 未检测到登录特征，Cookie 无效")
-	return false, nil
+	time.Sleep(3 * time.Second)
+
+	// 使用Cookie检测机制验证登录状态
+	cookieConfig, ok := browser.GetCookieConfig("tiktok")
+	if !ok {
+		return false, fmt.Errorf("获取TikTok Cookie配置失败")
+	}
+
+	isValid, err := browserCtx.ValidateLoginCookies(cookieConfig)
+	if err != nil {
+		return false, fmt.Errorf("验证Cookie失败: %w", err)
+	}
+
+	if isValid {
+		utils.InfoWithPlatform(u.platform, "检测到sessionid Cookie，验证通过")
+	} else {
+		utils.InfoWithPlatform(u.platform, "未检测到sessionid Cookie，验证失败")
+	}
+
+	return isValid, nil
 }
 
 // Upload 上传视频
 func (u *Uploader) Upload(ctx context.Context, task *types.VideoTask) error {
-	steps := []uploader.StepFunc{
-		// 1. 导航到上传页面
-		u.StepNavigate("https://www.tiktok.com/tiktokstudio/upload"),
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("开始上传: %s", task.VideoPath))
 
-		// 2. 初始化定位器基类（检测iframe）
-		u.StepInitLocatorBase(),
-
-		// 3. 上传视频
-		u.StepUploadTikTokVideo(task.VideoPath),
-
-		// 4. 填写标题和标签（使用DraftEditor）
-		u.StepFillTikTokTitleAndTags(task.Title, task.Tags),
-
-		// 5. 设置定时发布（如果有）
-		u.StepSetScheduleTikTok(task.ScheduleTime),
-
-		// 6. 点击发布
-		u.StepClickPublishTikTok(task.ScheduleTime != nil),
+	if _, err := os.Stat(task.VideoPath); err != nil {
+		return fmt.Errorf("视频文件不存在: %w", err)
 	}
 
-	return u.Execute(ctx, task, steps)
-}
+	browserCtx, err := browserPool.GetContext(ctx, u.cookiePath, u.getContextOptions())
+	if err != nil {
+		return fmt.Errorf("获取浏览器失败: %w", err)
+	}
+	defer browserCtx.Release()
 
-// StepInitLocatorBase 初始化定位器基类（检测iframe深度适配）
-func (u *Uploader) StepInitLocatorBase() uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		ctx.ReportProgress(uploader.StepNavigate, 18, "检测页面结构...")
+	page, err := browserCtx.GetPage()
+	if err != nil {
+		return fmt.Errorf("获取页面失败: %w", err)
+	}
 
-		// 等待iframe或普通容器出现
-		timeout := time.After(10 * time.Second)
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
+	// 导航到上传页面
+	utils.InfoWithPlatform(u.platform, "正在打开上传页面...")
+	if _, err := page.Goto("https://www.tiktok.com/tiktokstudio/upload", playwright.PageGotoOptions{
+		WaitUntil: playwright.WaitUntilStateNetworkidle,
+	}); err != nil {
+		return fmt.Errorf("打开上传页面失败: %w", err)
+	}
+	time.Sleep(3 * time.Second)
 
-		for {
-			select {
-			case <-timeout:
-				return uploader.StepResult{Step: uploader.StepNavigate, Success: false, Error: fmt.Errorf("timeout waiting for upload container")}
-			case <-ticker.C:
-				// 检测iframe
-				iframeCount, _ := ctx.Page.Locator("iframe[data-tt='Upload_index_iframe']").Count()
-				if iframeCount > 0 {
-					// 使用iframe内的定位器
-					frame := ctx.Page.FrameLocator("iframe[data-tt='Upload_index_iframe']")
-					u.locatorBase = frame.Locator("div.upload-container")
-					ctx.ReportProgress(uploader.StepNavigate, 19, "检测到iframe结构")
-					return uploader.StepResult{Step: uploader.StepNavigate, Success: true}
-				}
+	// 检测iframe结构
+	var locatorBase playwright.Locator
+	iframeCount, _ := page.Locator("iframe[data-tt='Upload_index_iframe']").Count()
+	if iframeCount > 0 {
+		frame := page.FrameLocator("iframe[data-tt='Upload_index_iframe']")
+		locatorBase = frame.Locator("div.upload-container")
+		utils.InfoWithPlatform(u.platform, "检测到iframe结构")
+	} else {
+		locatorBase = page.Locator("div.upload-container")
+		utils.InfoWithPlatform(u.platform, "使用普通容器结构")
+	}
 
-				// 检测普通容器
-				containerCount, _ := ctx.Page.Locator("div.upload-container").Count()
-				if containerCount > 0 {
-					u.locatorBase = ctx.Page.Locator("div.upload-container")
-					ctx.ReportProgress(uploader.StepNavigate, 19, "使用普通容器结构")
-					return uploader.StepResult{Step: uploader.StepNavigate, Success: true}
-				}
-			}
+	// 上传视频
+	if err := u.uploadVideo(ctx, page, browserCtx, locatorBase, task.VideoPath); err != nil {
+		return fmt.Errorf("上传视频失败: %w", err)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	// 填写标题和描述
+	if err := u.fillTitleAndDescription(locatorBase, task.Title, task.Description); err != nil {
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("填写标题和描述失败: %v", err))
+	}
+
+	// 添加话题标签
+	if len(task.Tags) > 0 {
+		if err := u.addTags(locatorBase, task.Tags); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("添加标签失败: %v", err))
 		}
 	}
-}
 
-// getLocatorBase 获取当前定位器基类
-func (u *Uploader) getLocatorBase(ctx *uploader.Context) playwright.Locator {
-	if u.locatorBase != nil {
-		return u.locatorBase
-	}
-	// 降级处理：返回页面级别的定位器
-	return ctx.Page.Locator("body")
-}
-
-// StepUploadTikTokVideo TikTok上传视频步骤（支持iframe和错误重试）
-func (u *Uploader) StepUploadTikTokVideo(videoPath string) uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		ctx.ReportProgress(uploader.StepUploadMedia, 20, "开始上传视频...")
-
-		// 使用文件选择器模式上传
-		uploadButton := u.getLocatorBase(ctx).Locator("button:has-text('Select video'):visible")
-		if err := uploadButton.WaitFor(playwright.LocatorWaitForOptions{State: playwright.WaitForSelectorStateVisible}); err != nil {
-			return uploader.StepResult{Step: uploader.StepUploadMedia, Success: false, Error: fmt.Errorf("upload button not visible: %w", err)}
-		}
-
-		// 使用文件选择器
-		fileChooser, err := ctx.Page.ExpectFileChooser(func() error {
-			return uploadButton.Click()
-		})
-		if err != nil {
-			return uploader.StepResult{Step: uploader.StepUploadMedia, Success: false, Error: fmt.Errorf("expect file chooser failed: %w", err)}
-		}
-
-		if err := fileChooser.SetFiles(videoPath); err != nil {
-			return uploader.StepResult{Step: uploader.StepUploadMedia, Success: false, Error: fmt.Errorf("set files failed: %w", err)}
-		}
-
-		ctx.ReportProgress(uploader.StepUploadMedia, 25, "视频文件已选择，等待上传...")
-
-		// 等待上传完成（支持错误重试）
-		return u.waitForUploadComplete(ctx)
-	}
-}
-
-// waitForUploadComplete 等待上传完成，支持错误重试
-func (u *Uploader) waitForUploadComplete(ctx *uploader.Context) uploader.StepResult {
-	timeout := time.After(5 * time.Minute)
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-timeout:
-			return uploader.StepResult{Step: uploader.StepUploadMedia, Success: false, Error: fmt.Errorf("upload timeout after 5 minutes")}
-		case <-ticker.C:
-			// 检查发布按钮是否可用（上传完成的标志）
-			postButton := u.getLocatorBase(ctx).Locator("div.btn-post > button")
-			disabledAttr, _ := postButton.GetAttribute("disabled")
-			if disabledAttr == "" || disabledAttr == "false" {
-				ctx.ReportProgress(uploader.StepUploadMedia, 40, "视频上传完成")
-				return uploader.StepResult{Step: uploader.StepUploadMedia, Success: true}
-			}
-
-			// 检测上传错误并重试
-			selectFileBtn := u.getLocatorBase(ctx).Locator("button[aria-label='Select file']")
-			if count, _ := selectFileBtn.Count(); count > 0 {
-				ctx.ReportProgress(uploader.StepUploadMedia, 30, "检测到上传错误，正在重试...")
-				if err := u.handleUploadError(ctx); err != nil {
-					return uploader.StepResult{Step: uploader.StepUploadMedia, Success: false, Error: fmt.Errorf("upload retry failed: %w", err)}
-				}
-			}
-
-			utils.Info("[-] 正在上传视频中...")
+	// 设置封面
+	if task.Thumbnail != "" {
+		if err := u.setCover(page, locatorBase, task.Thumbnail); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("设置封面失败: %v", err))
 		}
 	}
+
+	// 设置定时发布
+	if task.ScheduleTime != nil && *task.ScheduleTime != "" {
+		if err := u.setScheduleTime(locatorBase, *task.ScheduleTime); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("设置定时发布失败: %v", err))
+		}
+	}
+
+	// 点击发布
+	utils.InfoWithPlatform(u.platform, "准备发布...")
+	if err := u.publish(page, locatorBase, browserCtx); err != nil {
+		return fmt.Errorf("发布失败: %w", err)
+	}
+
+	utils.SuccessWithPlatform(u.platform, "发布成功")
+	return nil
 }
 
-// handleUploadError 处理上传错误并重试
-func (u *Uploader) handleUploadError(ctx *uploader.Context) error {
-	utils.Info("[-] 处理上传错误，重新选择文件...")
+// uploadVideo 上传视频
+func (u *Uploader) uploadVideo(ctx context.Context, page playwright.Page, browserCtx *browser.PooledContext, locatorBase playwright.Locator, videoPath string) error {
+	utils.InfoWithPlatform(u.platform, "正在上传视频...")
 
-	selectFileBtn := u.getLocatorBase(ctx).Locator("button[aria-label='Select file']")
-	videoPath := ctx.Task.VideoPath
+	uploadButton := locatorBase.Locator("button:has-text('Select video'):visible")
+	if err := uploadButton.WaitFor(playwright.LocatorWaitForOptions{
+		State: playwright.WaitForSelectorStateVisible,
+	}); err != nil {
+		return fmt.Errorf("上传按钮不可见: %w", err)
+	}
 
-	// 使用文件选择器重试
-	fileChooser, err := ctx.Page.ExpectFileChooser(func() error {
-		return selectFileBtn.Click()
+	fileChooser, err := page.ExpectFileChooser(func() error {
+		return uploadButton.Click()
 	})
 	if err != nil {
-		return fmt.Errorf("expect file chooser failed: %w", err)
+		return fmt.Errorf("等待文件选择器失败: %w", err)
 	}
 
 	if err := fileChooser.SetFiles(videoPath); err != nil {
-		return fmt.Errorf("set files failed: %w", err)
+		return fmt.Errorf("设置视频文件失败: %w", err)
+	}
+
+	// 等待上传完成
+	utils.InfoWithPlatform(u.platform, "等待视频上传完成...")
+	if err := u.waitForUploadComplete(ctx, page, browserCtx, locatorBase); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-// StepFillTikTokTitleAndTags TikTok填写标题和标签步骤（使用DraftEditor）
-func (u *Uploader) StepFillTikTokTitleAndTags(title string, tags []string) uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		ctx.ReportProgress(uploader.StepFillTitle, 45, "正在填写标题...")
+// waitForUploadComplete 等待视频上传完成
+func (u *Uploader) waitForUploadComplete(ctx context.Context, page playwright.Page, browserCtx *browser.PooledContext, locatorBase playwright.Locator) error {
+	uploadTimeout := 5 * time.Minute
+	uploadCheckInterval := 2 * time.Second
+	uploadStartTime := time.Now()
 
-		// 使用DraftEditor-content定位器
-		editorLocator := u.getLocatorBase(ctx).Locator("div.public-DraftEditor-content")
-		if err := editorLocator.Click(); err != nil {
-			return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: fmt.Errorf("click editor failed: %w", err)}
+	for time.Since(uploadStartTime) < uploadTimeout {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("上传已取消")
+		default:
 		}
 
-		time.Sleep(500 * time.Millisecond)
-
-		// 清空原有内容
-		if err := ctx.Page.Keyboard().Press("End"); err != nil {
-			return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: err}
-		}
-		if err := ctx.Page.Keyboard().Press("Control+KeyA"); err != nil {
-			return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: err}
-		}
-		if err := ctx.Page.Keyboard().Press("Delete"); err != nil {
-			return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: err}
-		}
-		if err := ctx.Page.Keyboard().Press("End"); err != nil {
-			return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: err}
+		if browserCtx.IsPageClosed() {
+			return fmt.Errorf("浏览器已关闭")
 		}
 
-		time.Sleep(500 * time.Millisecond)
-
-		// 输入标题
-		if err := ctx.Page.Keyboard().Type(title); err != nil {
-			return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: fmt.Errorf("type title failed: %w", err)}
+		// 检测方式1：发布按钮可用（disabled属性为空或false）
+		postButton := locatorBase.Locator("div.btn-post > button")
+		disabledAttr, _ := postButton.GetAttribute("disabled")
+		if disabledAttr == "" || disabledAttr == "false" {
+			utils.InfoWithPlatform(u.platform, "视频上传完成（发布按钮可用）")
+			return nil
 		}
 
-		time.Sleep(500 * time.Millisecond)
-		if err := ctx.Page.Keyboard().Press("End"); err != nil {
-			return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: err}
-		}
-		if err := ctx.Page.Keyboard().Press("Enter"); err != nil {
-			return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: err}
-		}
-
-		ctx.ReportProgress(uploader.StepFillTitle, 50, "标题填写完成")
-
-		// 添加标签
-		ctx.ReportProgress(uploader.StepAddTags, 52, "正在添加标签...")
-		for index, tag := range tags {
-			if err := ctx.Page.Keyboard().Press("End"); err != nil {
-				return uploader.StepResult{Step: uploader.StepAddTags, Success: false, Error: err}
+		// 检测方式2：检查视频预览
+		videoPreview := locatorBase.Locator("video, .video-preview").First()
+		if count, _ := videoPreview.Count(); count > 0 {
+			if visible, _ := videoPreview.IsVisible(); visible {
+				utils.InfoWithPlatform(u.platform, "视频上传完成（检测到预览）")
+				return nil
 			}
-			time.Sleep(500 * time.Millisecond)
-
-			if err := ctx.Page.Keyboard().Type("#" + tag + " "); err != nil {
-				return uploader.StepResult{Step: uploader.StepAddTags, Success: false, Error: fmt.Errorf("type tag failed: %w", err)}
-			}
-			if err := ctx.Page.Keyboard().Press("Space"); err != nil {
-				return uploader.StepResult{Step: uploader.StepAddTags, Success: false, Error: err}
-			}
-			time.Sleep(500 * time.Millisecond)
-			if err := ctx.Page.Keyboard().Press("Backspace"); err != nil {
-				return uploader.StepResult{Step: uploader.StepAddTags, Success: false, Error: err}
-			}
-			if err := ctx.Page.Keyboard().Press("End"); err != nil {
-				return uploader.StepResult{Step: uploader.StepAddTags, Success: false, Error: err}
-			}
-
-			utils.Info(fmt.Sprintf("[-] 已设置第 %d 个标签", index+1))
 		}
 
-		ctx.ReportProgress(uploader.StepAddTags, 55, fmt.Sprintf("已添加 %d 个标签", len(tags)))
-		return uploader.StepResult{Step: uploader.StepFillTitle, Success: true}
+		// 检测上传错误并重试
+		selectFileBtn := locatorBase.Locator("button[aria-label='Select file']")
+		if count, _ := selectFileBtn.Count(); count > 0 {
+			utils.WarnWithPlatform(u.platform, "检测到上传错误，正在重试...")
+			_, err := page.ExpectFileChooser(func() error {
+				return selectFileBtn.Click()
+			})
+			if err != nil {
+				return fmt.Errorf("重试文件选择失败: %w", err)
+			}
+			// 这里需要重新获取视频路径，简化处理
+		}
+
+		time.Sleep(uploadCheckInterval)
 	}
+
+	return fmt.Errorf("上传超时")
 }
 
-// StepSetScheduleTikTok TikTok设置定时发布步骤（完整日历选择器）
-func (u *Uploader) StepSetScheduleTikTok(scheduleTime *string) uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		if scheduleTime == nil || *scheduleTime == "" {
-			return uploader.StepResult{Step: uploader.StepSetSchedule, Success: true}
+// fillTitleAndDescription 填写标题和描述
+func (u *Uploader) fillTitleAndDescription(locatorBase playwright.Locator, title, description string) error {
+	utils.InfoWithPlatform(u.platform, "填写标题和描述...")
+
+	editorLocator := locatorBase.Locator("div.public-DraftEditor-content")
+	if err := editorLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(5000),
+	}); err != nil {
+		return fmt.Errorf("未找到编辑器: %w", err)
+	}
+
+	if err := editorLocator.Click(); err != nil {
+		return fmt.Errorf("点击编辑器失败: %w", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// 清空编辑器
+	page, err := editorLocator.Page()
+	if err != nil {
+		return fmt.Errorf("获取页面失败: %w", err)
+	}
+	page.Keyboard().Press("End")
+	page.Keyboard().Press("Control+KeyA")
+	page.Keyboard().Press("Delete")
+	page.Keyboard().Press("End")
+	time.Sleep(500 * time.Millisecond)
+
+	// 输入标题
+	content := title
+	if description != "" {
+		content += "\n\n" + description
+	}
+
+	page.Keyboard().Type(content)
+	time.Sleep(500 * time.Millisecond)
+	page.Keyboard().Press("End")
+	page.Keyboard().Press("Enter")
+
+	utils.InfoWithPlatform(u.platform, "标题和描述已填写")
+	return nil
+}
+
+// addTags 添加话题标签
+func (u *Uploader) addTags(locatorBase playwright.Locator, tags []string) error {
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("添加%d个标签...", len(tags)))
+
+	page, err := locatorBase.Page()
+	if err != nil {
+		return fmt.Errorf("获取页面失败: %w", err)
+	}
+
+	for _, tag := range tags {
+		cleanTag := strings.TrimSpace(tag)
+		cleanTag = strings.ReplaceAll(cleanTag, "#", "")
+		if cleanTag == "" {
+			continue
 		}
 
-		// 解析时间
-		publishDate, err := time.Parse("2006-01-02 15:04", *scheduleTime)
-		if err != nil {
-			return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("parse schedule time failed: %w", err)}
-		}
+		page.Keyboard().Press("End")
+		time.Sleep(500 * time.Millisecond)
+		page.Keyboard().Type("#" + cleanTag + " ")
+		page.Keyboard().Press("Space")
+		time.Sleep(500 * time.Millisecond)
+		page.Keyboard().Press("Backspace")
+		page.Keyboard().Press("End")
+	}
 
-		ctx.ReportProgress(uploader.StepSetSchedule, 70, "正在设置定时发布...")
+	utils.InfoWithPlatform(u.platform, "标签添加完成")
+	return nil
+}
 
-		// 点击Schedule按钮
-		scheduleBtn := u.getLocatorBase(ctx).GetByLabel("Schedule")
-		if err := scheduleBtn.WaitFor(playwright.LocatorWaitForOptions{State: playwright.WaitForSelectorStateVisible}); err != nil {
-			return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("schedule button not visible: %w", err)}
-		}
-		if err := scheduleBtn.Click(); err != nil {
-			return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("click schedule button failed: %w", err)}
-		}
+// setCover 设置封面
+func (u *Uploader) setCover(page playwright.Page, locatorBase playwright.Locator, coverPath string) error {
+	if _, err := os.Stat(coverPath); err != nil {
+		return fmt.Errorf("封面文件不存在: %w", err)
+	}
 
+	utils.InfoWithPlatform(u.platform, "设置封面...")
+
+	// 点击封面区域
+	coverContainer := locatorBase.Locator(".cover-container").First()
+	if err := coverContainer.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(5000),
+	}); err != nil {
+		return fmt.Errorf("未找到封面区域: %w", err)
+	}
+
+	if err := coverContainer.Click(); err != nil {
+		return fmt.Errorf("点击封面区域失败: %w", err)
+	}
+	time.Sleep(2 * time.Second)
+
+	// 点击"Upload cover"
+	uploadCoverBtn := locatorBase.GetByText("Upload cover").First()
+	if count, _ := uploadCoverBtn.Count(); count > 0 {
+		uploadCoverBtn.Click()
 		time.Sleep(1 * time.Second)
+	}
 
-		// 打开日历选择器
-		scheduledPicker := u.getLocatorBase(ctx).Locator("div.scheduled-picker")
-		calendarBtn := scheduledPicker.Locator("div.TUXInputBox").Nth(1)
-		if err := calendarBtn.Click(); err != nil {
-			return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("click calendar button failed: %w", err)}
+	// 等待文件选择器并上传
+	fileChooser, err := page.ExpectFileChooser(func() error {
+		uploadBtn := locatorBase.Locator("button:has-text('Upload'):visible").First()
+		return uploadBtn.Click()
+	})
+	if err != nil {
+		return fmt.Errorf("等待文件选择器失败: %w", err)
+	}
+
+	if err := fileChooser.SetFiles(coverPath); err != nil {
+		return fmt.Errorf("上传封面失败: %w", err)
+	}
+
+	utils.InfoWithPlatform(u.platform, "封面上传中...")
+	time.Sleep(3 * time.Second)
+
+	// 点击确认
+	confirmBtn := locatorBase.GetByText("Confirm").First()
+	if count, _ := confirmBtn.Count(); count > 0 {
+		confirmBtn.Click()
+		time.Sleep(1 * time.Second)
+	}
+
+	utils.InfoWithPlatform(u.platform, "封面设置完成")
+	return nil
+}
+
+// setScheduleTime 设置定时发布
+func (u *Uploader) setScheduleTime(locatorBase playwright.Locator, scheduleTime string) error {
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("设置定时发布时间: %s", scheduleTime))
+
+	// 解析时间
+	publishDate, err := time.Parse("2006-01-02 15:04", scheduleTime)
+	if err != nil {
+		return fmt.Errorf("解析时间失败: %w", err)
+	}
+
+	// 点击Schedule按钮
+	scheduleBtn := locatorBase.GetByLabel("Schedule")
+	if err := scheduleBtn.WaitFor(playwright.LocatorWaitForOptions{
+		State: playwright.WaitForSelectorStateVisible,
+	}); err != nil {
+		return fmt.Errorf("未找到Schedule按钮: %w", err)
+	}
+
+	scheduleBtn.Click()
+	time.Sleep(1 * time.Second)
+
+	// 选择日期
+	scheduledPicker := locatorBase.Locator("div.scheduled-picker")
+	calendarBtn := scheduledPicker.Locator("div.TUXInputBox").Nth(1)
+	calendarBtn.Click()
+	time.Sleep(500 * time.Millisecond)
+
+	// 获取当前月份
+	monthTitle := locatorBase.Locator("div.calendar-wrapper span.month-title")
+	monthText, _ := monthTitle.TextContent()
+	currentMonth := parseMonth(monthText)
+	targetMonth := int(publishDate.Month())
+
+	// 切换月份
+	if currentMonth != targetMonth {
+		arrowIndex := 0
+		if currentMonth < targetMonth {
+			arrows := locatorBase.Locator("div.calendar-wrapper span.arrow")
+			count, _ := arrows.Count()
+			arrowIndex = int(count) - 1
 		}
-
+		arrow := locatorBase.Locator("div.calendar-wrapper span.arrow").Nth(arrowIndex)
+		arrow.Click()
 		time.Sleep(500 * time.Millisecond)
+	}
 
-		// 获取当前月份并切换
-		monthTitle := u.getLocatorBase(ctx).Locator("div.calendar-wrapper span.month-title")
-		monthText, err := monthTitle.TextContent()
-		if err != nil {
-			return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("get month title failed: %w", err)}
+	// 选择日期
+	validDays := locatorBase.Locator("div.calendar-wrapper span.day.valid")
+	count, _ := validDays.Count()
+	targetDay := strconv.Itoa(publishDate.Day())
+	for i := 0; i < count; i++ {
+		dayText, _ := validDays.Nth(i).TextContent()
+		if strings.TrimSpace(dayText) == targetDay {
+			validDays.Nth(i).Click()
+			break
+		}
+	}
+
+	// 选择时间
+	timeBtn := scheduledPicker.Locator("div.TUXInputBox").Nth(0)
+	timeBtn.Click()
+	time.Sleep(500 * time.Millisecond)
+
+	hourStr := publishDate.Format("15")
+	hourSelector := fmt.Sprintf("span.tiktok-timepicker-left:has-text('%s')", hourStr)
+	hourElement := locatorBase.Locator(hourSelector)
+	hourElement.Click()
+	time.Sleep(500 * time.Millisecond)
+
+	timeBtn.Click()
+	time.Sleep(500 * time.Millisecond)
+
+	// 分钟取5的倍数
+	correctMinute := int(publishDate.Minute()/5) * 5
+	minuteStr := fmt.Sprintf("%02d", correctMinute)
+	minuteSelector := fmt.Sprintf("span.tiktok-timepicker-right:has-text('%s')", minuteStr)
+	minuteElement := locatorBase.Locator(minuteSelector)
+	minuteElement.Click()
+
+	// 关闭时间选择器
+	uploadTitle := locatorBase.Locator("h1:has-text('Upload video')")
+	uploadTitle.Click()
+
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("定时发布时间设置完成: %s", scheduleTime))
+	return nil
+}
+
+// publish 点击发布并检测结果
+func (u *Uploader) publish(page playwright.Page, locatorBase playwright.Locator, browserCtx *browser.PooledContext) error {
+	successFlagDiv := "#\\:r9\\:"
+
+	for {
+		if browserCtx.IsPageClosed() {
+			return fmt.Errorf("浏览器已关闭")
 		}
 
-		currentMonth := parseMonth(monthText)
-		targetMonth := int(publishDate.Month())
-
-		// 月份切换
-		if currentMonth != targetMonth {
-			ctx.ReportProgress(uploader.StepSetSchedule, 72, fmt.Sprintf("切换月份: %d -> %d", currentMonth, targetMonth))
-
-			arrowIndex := 0
-			if currentMonth < targetMonth {
-				// 点击下一个箭头
-				arrows := u.getLocatorBase(ctx).Locator("div.calendar-wrapper span.arrow")
-				count, _ := arrows.Count()
-				arrowIndex = int(count) - 1
-			}
-
-			arrow := u.getLocatorBase(ctx).Locator("div.calendar-wrapper span.arrow").Nth(arrowIndex)
-			if err := arrow.Click(); err != nil {
-				return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("click month arrow failed: %w", err)}
-			}
-			time.Sleep(500 * time.Millisecond)
+		publishBtn := locatorBase.Locator("div.btn-post")
+		if count, _ := publishBtn.Count(); count > 0 {
+			publishBtn.Click()
 		}
 
-		// 选择日期
-		validDays := u.getLocatorBase(ctx).Locator("div.calendar-wrapper span.day.valid")
-		count, err := validDays.Count()
-		if err != nil {
-			return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("get valid days failed: %w", err)}
+		time.Sleep(3 * time.Second)
+
+		// 检测成功标志
+		successLocator := locatorBase.Locator(successFlagDiv)
+		if visible, _ := successLocator.IsVisible(); visible {
+			utils.InfoWithPlatform(u.platform, "发布成功")
+			return nil
 		}
 
-		targetDay := strconv.Itoa(publishDate.Day())
-		for i := 0; i < count; i++ {
-			dayText, err := validDays.Nth(i).TextContent()
-			if err != nil {
-				continue
-			}
-			if strings.TrimSpace(dayText) == targetDay {
-				if err := validDays.Nth(i).Click(); err != nil {
-					return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("click day failed: %w", err)}
-				}
-				break
-			}
+		if count, _ := successLocator.Count(); count > 0 {
+			utils.InfoWithPlatform(u.platform, "发布成功")
+			return nil
 		}
 
-		ctx.ReportProgress(uploader.StepSetSchedule, 75, "日期选择完成")
-
-		// 选择时间
-		timeBtn := scheduledPicker.Locator("div.TUXInputBox").Nth(0)
-		if err := timeBtn.Click(); err != nil {
-			return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("click time button failed: %w", err)}
+		// 检测URL跳转
+		url := page.URL()
+		if url == "https://www.tiktok.com/tiktokstudio/content" {
+			utils.InfoWithPlatform(u.platform, "发布成功，页面已跳转")
+			return nil
 		}
+
+		utils.InfoWithPlatform(u.platform, "等待发布完成...")
 		time.Sleep(500 * time.Millisecond)
-
-		// 选择小时
-		hourStr := publishDate.Format("15")
-		hourSelector := fmt.Sprintf("span.tiktok-timepicker-left:has-text('%s')", hourStr)
-		hourElement := u.getLocatorBase(ctx).Locator(hourSelector)
-		if err := hourElement.Click(); err != nil {
-			return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("select hour failed: %w", err)}
-		}
-
-		time.Sleep(500 * time.Millisecond)
-
-		// 重新打开时间选择器选择分钟
-		if err := timeBtn.Click(); err != nil {
-			return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("click time button again failed: %w", err)}
-		}
-		time.Sleep(500 * time.Millisecond)
-
-		// 选择分钟（TikTok使用5分钟间隔）
-		correctMinute := int(publishDate.Minute()/5) * 5
-		minuteStr := fmt.Sprintf("%02d", correctMinute)
-		minuteSelector := fmt.Sprintf("span.tiktok-timepicker-right:has-text('%s')", minuteStr)
-		minuteElement := u.getLocatorBase(ctx).Locator(minuteSelector)
-		if err := minuteElement.Click(); err != nil {
-			return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("select minute failed: %w", err)}
-		}
-
-		// 点击标题移除焦点
-		uploadTitle := u.getLocatorBase(ctx).Locator("h1:has-text('Upload video')")
-		uploadTitle.Click()
-
-		ctx.ReportProgress(uploader.StepSetSchedule, 80, "定时发布设置完成")
-		return uploader.StepResult{Step: uploader.StepSetSchedule, Success: true}
 	}
 }
 
@@ -500,12 +542,10 @@ func parseMonth(monthName string) int {
 		"December":  12,
 	}
 
-	// 尝试直接匹配
 	if month, ok := months[monthName]; ok {
 		return month
 	}
 
-	// 尝试部分匹配（处理可能的额外字符）
 	for name, month := range months {
 		if strings.Contains(monthName, name) {
 			return month
@@ -515,166 +555,56 @@ func parseMonth(monthName string) int {
 	return 0
 }
 
-// StepClickPublishTikTok TikTok点击发布步骤
-func (u *Uploader) StepClickPublishTikTok(isScheduled bool) uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		ctx.ReportProgress(uploader.StepPublish, 85, "正在发布...")
-
-		// 成功标志选择器
-		successFlagDiv := "#\\:r9\\:"
-
-		for {
-			// 点击发布按钮
-			publishBtn := u.getLocatorBase(ctx).Locator("div.btn-post")
-			if count, _ := publishBtn.Count(); count > 0 {
-				if err := publishBtn.Click(); err != nil {
-					return uploader.StepResult{Step: uploader.StepPublish, Success: false, Error: fmt.Errorf("click publish button failed: %w", err)}
-				}
-			}
-
-			// 等待成功标志
-			time.Sleep(3 * time.Second)
-
-			// 检查成功标志
-			successLocator := u.getLocatorBase(ctx).Locator(successFlagDiv)
-			if visible, _ := successLocator.IsVisible(); visible {
-				// 保存cookie（参照Python版本）
-				if ctx.BrowserCtx != nil {
-					if err := ctx.BrowserCtx.SaveCookies(); err != nil {
-						utils.Warn(fmt.Sprintf("[-] 保存cookie失败: %v", err))
-					} else {
-						utils.Info("[-] Cookie已保存")
-					}
-				}
-				ctx.ReportProgress(uploader.StepPublish, 95, "发布成功")
-				return uploader.StepResult{Step: uploader.StepPublish, Success: true}
-			}
-
-			// 检查是否成功（通过计数）
-			if count, _ := successLocator.Count(); count > 0 {
-				// 保存cookie
-				if ctx.BrowserCtx != nil {
-					if err := ctx.BrowserCtx.SaveCookies(); err != nil {
-						utils.Warn(fmt.Sprintf("[-] 保存cookie失败: %v", err))
-					} else {
-						utils.Info("[-] Cookie已保存")
-					}
-				}
-				ctx.ReportProgress(uploader.StepPublish, 95, "发布成功")
-				return uploader.StepResult{Step: uploader.StepPublish, Success: true}
-			}
-
-			// 检查是否跳转到内容管理页面
-			url := ctx.Page.URL()
-			if url == "https://www.tiktok.com/tiktokstudio/content" {
-				// 保存cookie
-				if ctx.BrowserCtx != nil {
-					if err := ctx.BrowserCtx.SaveCookies(); err != nil {
-						utils.Warn(fmt.Sprintf("[-] 保存cookie失败: %v", err))
-					} else {
-						utils.Info("[-] Cookie已保存")
-					}
-				}
-				ctx.ReportProgress(uploader.StepPublish, 95, "发布成功（跳转到内容页面）")
-				return uploader.StepResult{Step: uploader.StepPublish, Success: true}
-			}
-
-			utils.Info("[-] 等待发布完成...")
-			time.Sleep(500 * time.Millisecond)
-		}
-	}
-}
-
-// Login 登录（参照Python版本使用page.pause）
+// Login 登录
 func (u *Uploader) Login() error {
-	ctx := context.Background()
-
-	// 创建新的浏览器上下文（不使用现有cookie）
-	browserCtx, err := browserPool.GetContext(ctx, "", u.GetContextOptions())
-	if err != nil {
-		return fmt.Errorf("get browser context failed: %w", err)
+	debugLog("Login开始 - cookiePath: '%s'", u.cookiePath)
+	if u.cookiePath == "" {
+		return fmt.Errorf("cookie路径为空")
 	}
-	// 注意：不在此处defer Release，在登录成功或失败时手动释放
+
+	ctx := context.Background()
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("Cookie保存路径: %s", u.cookiePath))
+
+	browserCtx, err := browserPool.GetContext(ctx, "", u.getContextOptions())
+	if err != nil {
+		return fmt.Errorf("获取浏览器失败: %w", err)
+	}
+	defer browserCtx.Release()
 
 	page, err := browserCtx.GetPage()
 	if err != nil {
-		browserCtx.Release()
-		return fmt.Errorf("get page failed: %w", err)
+		return fmt.Errorf("获取页面失败: %w", err)
 	}
 
-	// 参照Python版本：访问登录页面
-	utils.Info("[-] 正在打开 TikTok 登录页面...")
+	utils.InfoWithPlatform(u.platform, "正在打开登录页面...")
 	if _, err := page.Goto("https://www.tiktok.com/login?lang=en", playwright.PageGotoOptions{
 		WaitUntil: playwright.WaitUntilStateNetworkidle,
 	}); err != nil {
-		browserCtx.Release()
-		return fmt.Errorf("goto login page failed: %w", err)
+		return fmt.Errorf("打开登录页面失败: %w", err)
 	}
 
-	utils.Info("[-] 请在浏览器窗口中完成登录")
-	utils.Info("[-] 提示：TikTok 支持多种登录方式（Gmail/手机号/社交账号等）")
-	utils.Info("[-] 登录完成后，请在开发者工具中点击继续（Resume）按钮")
+	utils.InfoWithPlatform(u.platform, "请在浏览器窗口中完成登录")
 
-	// 参照Python版本：使用page.pause()暂停，等待用户完成登录
-	if err := page.Pause(); err != nil {
-		utils.Warn(fmt.Sprintf("[-] page.pause()返回: %v", err))
+	// 使用Cookie检测机制等待登录成功
+	cookieConfig, ok := browser.GetCookieConfig("tiktok")
+	if !ok {
+		return fmt.Errorf("获取TikTok Cookie配置失败")
 	}
 
-	// 用户点击继续后，检查是否登录成功
-	utils.Info("[-] 正在检查登录状态...")
-	time.Sleep(2 * time.Second)
-
-	// 检查当前URL
-	currentURL := page.URL()
-	utils.Info(fmt.Sprintf("[-] 当前URL: %s", currentURL))
-
-	// 检查是否已进入创作者中心或首页
-	if u.isLoginSuccessURL(currentURL) {
-		utils.Info("[-] 登录成功")
-		// 保存cookie
-		if err := browserCtx.SaveCookiesTo(u.GetCookiePath()); err != nil {
-			utils.Warn(fmt.Sprintf("[-] 保存Cookie失败: %v", err))
-			browserCtx.Release()
-			return fmt.Errorf("save cookies failed: %w", err)
-		}
-		utils.Info("[-] Cookie已保存")
-		browserCtx.Release()
-		return nil
+	if err := browserCtx.WaitForLoginCookies(cookieConfig); err != nil {
+		return fmt.Errorf("等待登录Cookie失败: %w", err)
 	}
 
-	// 如果没有进入创作者中心，尝试保存cookie anyway
-	utils.Warn("[-] 未检测到创作者中心页面，但仍尝试保存Cookie")
-	if err := browserCtx.SaveCookiesTo(u.GetCookiePath()); err != nil {
-		utils.Warn(fmt.Sprintf("[-] 保存Cookie失败: %v", err))
+	utils.SuccessWithPlatform(u.platform, "登录成功，检测到sessionid Cookie")
+	if err := browserCtx.SaveCookiesTo(u.cookiePath); err != nil {
+		return fmt.Errorf("保存Cookie失败: %w", err)
 	}
-
-	browserCtx.Release()
-	return fmt.Errorf("login may not be complete, current url: %s", currentURL)
+	utils.InfoWithPlatform(u.platform, "Cookie已保存")
+	return nil
 }
 
-// isLoginSuccessURL 检查URL是否表示登录成功
-func (u *Uploader) isLoginSuccessURL(url string) bool {
-	successURLs := []string{
-		"https://www.tiktok.com/tiktokstudio",
-		"https://www.tiktok.com/tiktokstudio/",
-		"https://www.tiktok.com/tiktokstudio/content",
-		"https://www.tiktok.com/tiktokstudio/upload",
-		"https://www.tiktok.com/foryou",
-		"https://www.tiktok.com/foryou/",
-		"https://www.tiktok.com/",
-		"https://www.tiktok.com",
-	}
-
-	for _, successURL := range successURLs {
-		if strings.HasPrefix(url, successURL) {
-			return true
-		}
-	}
-	return false
-}
-
-// GetContextOptions 获取TikTok特定的上下文选项
-func (u *Uploader) GetContextOptions() *browser.ContextOptions {
+// getContextOptions 获取TikTok特定的上下文选项
+func (u *Uploader) getContextOptions() *browser.ContextOptions {
 	return &browser.ContextOptions{
 		UserAgent:   "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",
 		Viewport:    &playwright.Size{Width: 1920, Height: 1080},

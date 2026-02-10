@@ -14,6 +14,8 @@ type AppConfig struct {
 	ThumbnailPath     string
 	UploadConcurrency int
 	DefaultTimeout    int
+	DebugMode         bool // 调试模式开关
+	Headless          bool // 浏览器无头模式开关（true=隐藏浏览器窗口）
 }
 
 var Config *AppConfig
@@ -36,6 +38,8 @@ func Init() error {
 		ThumbnailPath:     filepath.Join(baseDir, DefaultThumbnailPath),
 		UploadConcurrency: UploadConcurrency,
 		DefaultTimeout:    DefaultTimeout,
+		DebugMode:         os.Getenv("FUPLOADER_DEBUG") == "true", // 通过环境变量控制调试模式
+		Headless:          os.Getenv("FUPLOADER_HEADLESS") == "true", // 通过环境变量控制无头模式
 	}
 
 	// 创建目录（只创建目录，不包括数据库文件路径）

@@ -193,7 +193,15 @@ export const PLATFORM_PUBLISH_FIELDS: Record<PlatformType, PlatformField[]> = {
     { key: 'copyright', label: '转载类型', type: 'select', options: [
       { label: '自制', value: '1' },
       { label: '转载', value: '2' }
-    ], defaultValue: '1' }
+    ], defaultValue: '1' },
+    {
+      key: 'thumbnail',
+      label: '视频封面',
+      type: 'image',
+      placeholder: '选择封面图片',
+      allowAutoSelect: true,
+      autoSelectText: '使用推荐封面'
+    }
   ],
   
   // 小红书 - 补充封面

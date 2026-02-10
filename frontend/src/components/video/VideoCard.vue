@@ -1,7 +1,26 @@
 <template>
   <div class="video-card">
     <div class="video-thumbnail" @click="$emit('preview', video.id)">
-      <img :src="video.thumbnail || defaultThumbnail" :alt="video.title" />
+      <el-image
+        :src="video.thumbnail || defaultThumbnail"
+        :alt="video.title || video.filename"
+        fit="cover"
+        class="thumbnail-image"
+        :preview-src-list="video.thumbnail ? [video.thumbnail] : []"
+        :preview-teleported="true"
+        hide-on-click-modal
+      >
+        <template #error>
+          <div class="thumbnail-fallback">
+            <el-icon :size="40"><VideoCamera /></el-icon>
+          </div>
+        </template>
+        <template #placeholder>
+          <div class="thumbnail-loading">
+            <el-icon :size="24" class="is-loading"><Loading /></el-icon>
+          </div>
+        </template>
+      </el-image>
       <div class="video-duration" v-if="video.duration">
         {{ formatDuration(video.duration) }}
       </div>
@@ -86,12 +105,23 @@ const defaultThumbnail = '/images/default-video-thumb.png'
   aspect-ratio: 16/9;
   overflow: hidden;
   cursor: pointer;
+  background: var(--bg-secondary);
 }
 
-.video-thumbnail img {
+.thumbnail-image {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+}
+
+.thumbnail-fallback,
+.thumbnail-loading {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-secondary);
+  color: var(--text-tertiary);
 }
 
 .video-duration {

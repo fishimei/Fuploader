@@ -9,13 +9,15 @@ export function AddLog(arg1:string):Promise<void>;
 
 export function AddVideo(arg1:string):Promise<database.Video>;
 
-export function AutoSelectCover(arg1:number):Promise<Record<string, string>>;
+export function AutoSelectCover(arg1:number):Promise<types.CoverInfo>;
 
 export function BatchDeleteScreenshots(arg1:Array<string>):Promise<number>;
 
 export function CancelUploadTask(arg1:number):Promise<void>;
 
 export function CleanOldScreenshots():Promise<number>;
+
+export function ClearThumbnail(arg1:number):Promise<void>;
 
 export function CreateUploadTask(arg1:number,arg2:Array<number>,arg3:any,arg4:any):Promise<Array<database.UploadTask>>;
 
@@ -31,15 +33,21 @@ export function DeleteVideo(arg1:number):Promise<void>;
 
 export function ExecuteTask(arg1:number):Promise<void>;
 
+export function ExtractVideoFrame(arg1:number,arg2:number):Promise<types.CoverInfo>;
+
 export function GenerateScheduleTimes(arg1:number):Promise<Array<string>>;
 
 export function GetAccounts():Promise<Array<database.Account>>;
 
-export function GetAppStatus():Promise<Record<string, any>>;
+export function GetAppStatus():Promise<types.AppStatus>;
 
 export function GetAppVersion():Promise<types.AppVersion>;
 
-export function GetCollections(arg1:string):Promise<Array<Record<string, string>>>;
+export function GetCollections(arg1:string):Promise<Array<types.Collection>>;
+
+export function GetHeadlessConfig():Promise<boolean>;
+
+export function GetLogPlatforms():Promise<Array<string>>;
 
 export function GetLogs(arg1:types.LogQuery):Promise<Array<types.SimpleLog>>;
 
@@ -55,11 +63,15 @@ export function GetUploadTasks(arg1:string):Promise<Array<database.UploadTask>>;
 
 export function GetVideos():Promise<Array<database.Video>>;
 
+export function IsLogDedupEnabled():Promise<boolean>;
+
 export function LoginAccount(arg1:number):Promise<void>;
 
 export function OpenDirectory(arg1:string):Promise<void>;
 
 export function OpenScreenshotDir(arg1:string):Promise<void>;
+
+export function ReloginAccount(arg1:number):Promise<void>;
 
 export function RetryUploadTask(arg1:number):Promise<void>;
 
@@ -69,6 +81,10 @@ export function SelectImageFile():Promise<string>;
 
 export function SelectVideoFile():Promise<string>;
 
+export function SetHeadlessConfig(arg1:boolean):Promise<void>;
+
+export function SetLogDedupEnabled(arg1:boolean):Promise<void>;
+
 export function UpdateAccount(arg1:database.Account):Promise<void>;
 
 export function UpdateScheduleConfig(arg1:database.ScheduleConfig):Promise<void>;
@@ -77,6 +93,8 @@ export function UpdateScreenshotConfig(arg1:types.ScreenshotConfig):Promise<void
 
 export function UpdateVideo(arg1:database.Video):Promise<void>;
 
+export function UploadThumbnail(arg1:number,arg2:string):Promise<types.CoverInfo>;
+
 export function ValidateAccount(arg1:number):Promise<boolean>;
 
-export function ValidateProductLink(arg1:string):Promise<Record<string, any>>;
+export function ValidateProductLink(arg1:string):Promise<types.ProductLinkValidationResult>;

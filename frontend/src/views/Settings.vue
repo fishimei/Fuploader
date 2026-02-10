@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useScheduleStore, useThemeStore, useScreenshotStore } from '../stores'
 import { getAppVersion } from '../api'
+import { getHeadlessConfig, setHeadlessConfig } from '../api/system'
 import type { AppVersion } from '../types'
 
 const scheduleStore = useScheduleStore()
@@ -11,6 +12,8 @@ const screenshotStore = useScreenshotStore()
 
 const appVersion = ref<AppVersion | null>(null)
 const timeInput = ref('')
+const headlessMode = ref(false)
+const headlessLoading = ref(false)
 
 async function handleSaveSchedule() {
   try {
@@ -72,12 +75,26 @@ async function handleOpenScreenshotDir() {
   }
 }
 
+async function handleHeadlessModeChange() {
+  headlessLoading.value = true
+  try {
+    await setHeadlessConfig(headlessMode.value)
+    ElMessage.success(headlessMode.value ? '无头模式已启用' : '无头模式已禁用')
+  } catch (error) {
+    ElMessage.error('设置失败')
+    headlessMode.value = !headlessMode.value
+  } finally {
+    headlessLoading.value = false
+  }
+}
+
 onMounted(async () => {
   scheduleStore.fetchConfig()
   screenshotStore.fetchConfig()
   screenshotStore.fetchPlatformStats()
   try {
     appVersion.value = await getAppVersion()
+    headlessMode.value = await getHeadlessConfig()
   } catch (error) {
     console.error('获取版本信息失败:', error)
   }
@@ -112,6 +129,37 @@ onMounted(async () => {
               深色
             </el-radio-button>
           </el-radio-group>
+        </div>
+      </div>
+
+      <!-- 浏览器设置 -->
+      <div class="settings-section">
+        <h3 class="section-title">
+          <el-icon><Monitor /></el-icon>
+          浏览器设置
+        </h3>
+        <div class="settings-form">
+          <el-form label-position="top">
+            <el-form-item>
+              <template #label>
+                <div class="form-label-with-tag">
+                  <span>无头模式</span>
+                  <el-tag v-if="headlessMode" type="success" size="small">已启用</el-tag>
+                  <el-tag v-else type="info" size="small">已禁用</el-tag>
+                </div>
+              </template>
+              <el-switch
+                v-model="headlessMode"
+                active-text="开启"
+                inactive-text="关闭"
+                :loading="headlessLoading"
+                @change="handleHeadlessModeChange"
+              />
+              <div class="form-hint">
+                开启后，上传视频时浏览器窗口将隐藏运行，不显示界面
+              </div>
+            </el-form-item>
+          </el-form>
         </div>
       </div>
 

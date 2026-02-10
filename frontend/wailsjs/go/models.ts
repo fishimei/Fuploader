@@ -163,6 +163,22 @@ export namespace database {
 
 export namespace types {
 	
+	export class AppStatus {
+	    initialized: boolean;
+	    error: string;
+	    version: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AppStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.initialized = source["initialized"];
+	        this.error = source["error"];
+	        this.version = source["version"];
+	    }
+	}
 	export class AppVersion {
 	    version: string;
 	    buildTime: string;
@@ -181,9 +197,37 @@ export namespace types {
 	        this.wailsVersion = source["wailsVersion"];
 	    }
 	}
+	export class Collection {
+	    label: string;
+	    value: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Collection(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.label = source["label"];
+	        this.value = source["value"];
+	    }
+	}
+	export class CoverInfo {
+	    thumbnailPath: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CoverInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.thumbnailPath = source["thumbnailPath"];
+	    }
+	}
 	export class LogQuery {
 	    keyword: string;
 	    limit: number;
+	    platform: string;
+	    level: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new LogQuery(source);
@@ -193,6 +237,8 @@ export namespace types {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.keyword = source["keyword"];
 	        this.limit = source["limit"];
+	        this.platform = source["platform"];
+	        this.level = source["level"];
 	    }
 	}
 	export class PlatformScreenshotConfig {
@@ -211,6 +257,22 @@ export namespace types {
 	        this.name = source["name"];
 	        this.dir = source["dir"];
 	        this.screenshotCount = source["screenshotCount"];
+	    }
+	}
+	export class ProductLinkValidationResult {
+	    valid: boolean;
+	    title?: string;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ProductLinkValidationResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.valid = source["valid"];
+	        this.title = source["title"];
+	        this.error = source["error"];
 	    }
 	}
 	export class ScreenshotConfig {
@@ -344,6 +406,8 @@ export namespace types {
 	    date: string;
 	    time: string;
 	    message: string;
+	    platform: string;
+	    level: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new SimpleLog(source);
@@ -354,6 +418,8 @@ export namespace types {
 	        this.date = source["date"];
 	        this.time = source["time"];
 	        this.message = source["message"];
+	        this.platform = source["platform"];
+	        this.level = source["level"];
 	    }
 	}
 

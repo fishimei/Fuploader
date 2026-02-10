@@ -19,4 +19,10 @@ export interface VideoFormData {
   title: string
   description: string
   tags: string[]
+  thumbnail: string
+}
+
+// 封面信息
+export interface CoverInfo {
+  thumbnailPath: string
 }

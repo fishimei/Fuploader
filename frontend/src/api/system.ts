@@ -1,6 +1,8 @@
 import {
   GetAppVersion,
-  OpenDirectory
+  OpenDirectory,
+  GetHeadlessConfig,
+  SetHeadlessConfig
 } from '../../wailsjs/go/app/App'
 import type { AppVersion } from '../types'
 
@@ -21,6 +23,27 @@ export async function openDirectory(path: string): Promise<void> {
     await OpenDirectory(path)
   } catch (error) {
     console.error('打开目录失败:', error)
+    throw error
+  }
+}
+
+// 获取浏览器无头模式配置
+export async function getHeadlessConfig(): Promise<boolean> {
+  try {
+    const result = await GetHeadlessConfig()
+    return result
+  } catch (error) {
+    console.error('获取无头模式配置失败:', error)
+    return false
+  }
+}
+
+// 设置浏览器无头模式配置
+export async function setHeadlessConfig(headless: boolean): Promise<void> {
+  try {
+    await SetHeadlessConfig(headless)
+  } catch (error) {
+    console.error('设置无头模式配置失败:', error)
     throw error
   }
 }

@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"Fuploader/internal/config"
 	"Fuploader/internal/platform/platformutils"
 	"Fuploader/internal/utils"
 
@@ -55,6 +57,7 @@ type PooledContext struct {
 	createdAt  time.Time
 	lastUsed   time.Time
 	parent     *PooledBrowser
+	platform   string // 平台标识，用于日志
 }
 
 // ContextOptions 上下文选项
@@ -65,6 +68,19 @@ type ContextOptions struct {
 	TimezoneId   string
 	Geolocation  *playwright.Geolocation
 	ExtraHeaders map[string]string
+	// 反爬相关选项
+	EnableAntiDetect  bool // 启用反检测
+	EnableRandomDelay bool // 启用随机延迟
+	HumanLikeBehavior bool // 模拟人类行为
+}
+
+// DefaultContextOptions 返回默认上下文选项（带反爬配置）
+func DefaultContextOptions() *ContextOptions {
+	return &ContextOptions{
+		EnableAntiDetect:  true,
+		EnableRandomDelay: true,
+		HumanLikeBehavior: true,
+	}
 }
 
 // NewPool 创建浏览器池
@@ -79,14 +95,24 @@ func NewPool(maxBrowsers, maxContexts int) *Pool {
 
 // NewPoolFromConfig 从配置创建浏览器池
 func NewPoolFromConfig() *Pool {
-	config := LoadPoolConfig()
-	return NewPool(config.MaxBrowsers, config.MaxContextsPerBrowser)
+	poolConfig := LoadPoolConfig()
+	return NewPool(poolConfig.MaxBrowsers, poolConfig.MaxContextsPerBrowser)
 }
 
 // GetContext 获取浏览器上下文
 func (p *Pool) GetContext(ctx context.Context, cookiePath string, options *ContextOptions) (*PooledContext, error) {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
+
+	// 使用默认选项
+	if options == nil {
+		options = DefaultContextOptions()
+	}
+
+	// 如果启用反检测，生成随机指纹
+	if options.EnableAntiDetect {
+		options = p.generateRandomFingerprint(options)
+	}
 
 	// 1. 尝试复用现有上下文
 	for _, browser := range p.browsers {
@@ -109,6 +135,51 @@ func (p *Pool) GetContext(ctx context.Context, cookiePath string, options *Conte
 
 	p.updateStats()
 	return pooledCtx, nil
+}
+
+// generateRandomFingerprint 生成随机浏览器指纹
+func (p *Pool) generateRandomFingerprint(baseOptions *ContextOptions) *ContextOptions {
+	chromeVersions := []string{"120", "121", "122", "123", "124", "125"}
+	version := chromeVersions[rand.Intn(len(chromeVersions))]
+
+	// 随机视口（在合理范围内变化）
+	width := 1920 + rand.Intn(100) - 50
+	height := 1080 + rand.Intn(100) - 50
+
+	// 随机地理位置（北京附近）
+	lat := 39.9042 + (rand.Float64()-0.5)*0.1
+	lng := 116.4074 + (rand.Float64()-0.5)*0.1
+
+	options := &ContextOptions{
+		UserAgent: fmt.Sprintf(
+			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%s.0.0.0 Safari/537.36",
+			version,
+		),
+		Viewport: &playwright.Size{
+			Width:  width,
+			Height: height,
+		},
+		Locale:     "zh-CN",
+		TimezoneId: "Asia/Shanghai",
+		Geolocation: &playwright.Geolocation{
+			Latitude:  lat,
+			Longitude: lng,
+		},
+		ExtraHeaders: map[string]string{
+			"Accept-Language":           "zh-CN,zh;q=0.9,en;q=0.8",
+			"Sec-Ch-Ua":                 fmt.Sprintf(`"Not_A Brand";v="8", "Chromium";v="%s", "Google Chrome";v="%s"`, version, version),
+			"Sec-Ch-Ua-Mobile":          "?0",
+			"Sec-Ch-Ua-Platform":        `"Windows"`,
+			"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+			"Accept-Encoding":           "gzip, deflate, br",
+			"Upgrade-Insecure-Requests": "1",
+		},
+		EnableAntiDetect:  baseOptions.EnableAntiDetect,
+		EnableRandomDelay: baseOptions.EnableRandomDelay,
+		HumanLikeBehavior: baseOptions.HumanLikeBehavior,
+	}
+
+	return options
 }
 
 // GetStats 获取浏览器池统计信息
@@ -202,7 +273,7 @@ func (p *Pool) launchBrowser() (playwright.Browser, error) {
 	chromePath := findLocalChrome()
 
 	launchOptions := playwright.BrowserTypeLaunchOptions{
-		Headless: playwright.Bool(false),
+		Headless: playwright.Bool(config.Config.Headless),
 		Args: []string{
 			"--disable-blink-features=AutomationControlled",
 			"--disable-web-security",
@@ -219,7 +290,7 @@ func (p *Pool) launchBrowser() (playwright.Browser, error) {
 			"--disable-sync",
 			"--disable-translate",
 			"--disable-popup-blocking",
-			"--disable-features=IsolateOrigins,site-per-process",
+			"--disable-features=IsolateOrigins,site-per-process,SameSiteByDefaultCookies,CookiesWithoutSameSiteMustBeSecure",
 			"--disable-site-isolation-trials",
 		},
 	}
@@ -270,8 +341,6 @@ func (b *PooledBrowser) createContext(cookiePath string, options *ContextOptions
 		Permissions:      []string{"geolocation"},
 		ColorScheme:      playwright.ColorSchemeLight,
 		ExtraHttpHeaders: options.ExtraHeaders,
-		// 不设置 Viewport，让浏览器使用 --window-size 参数决定窗口大小
-		// 这样可以避免 Playwright 视口设置与 Chrome 窗口大小冲突
 	}
 
 	if options.UserAgent != "" {
@@ -315,30 +384,64 @@ func (c *PooledContext) Release() error {
 	c.parent.mutex.Lock()
 	defer c.parent.mutex.Unlock()
 
-	// 检查页面是否已关闭
+	// 获取平台标识，如果为空则使用默认值
+	platform := c.platform
+	if platform == "" {
+		platform = "browser"
+	}
+
+	// 检查页面是否已关闭（用户手动关闭浏览器）
 	if c.IsPageClosed() {
-		utils.Info("[-] 页面已关闭，清理上下文")
+		utils.Info(fmt.Sprintf("[-] [%s] 浏览器被用户关闭，执行清理...", platform))
+
+		// 尝试保存Cookie（如果可能）
+		if c.cookiePath != "" {
+			utils.Info(fmt.Sprintf("[-] [%s] 尝试保存Cookie状态...", platform))
+			if err := c.SaveCookiesTo(c.cookiePath); err != nil {
+				utils.Warn(fmt.Sprintf("[-] [%s] 保存Cookie失败（页面已关闭）: %v", platform, err))
+			} else {
+				utils.Info(fmt.Sprintf("[-] [%s] Cookie已保存", platform))
+			}
+		}
+
 		// 关闭整个上下文
-		c.context.Close()
+		if err := c.context.Close(); err != nil {
+			utils.Warn(fmt.Sprintf("[-] [%s] 关闭上下文失败: %v", platform, err))
+		}
+
 		// 从父浏览器的上下文中移除
 		c.removeFromParent()
 		c.parent.inUse--
-		return fmt.Errorf("page was closed by user")
+
+		utils.Info(fmt.Sprintf("[-] [%s] 浏览器上下文已清理完成", platform))
+		return fmt.Errorf("browser was closed by user")
 	}
+
+	// 正常释放流程（页面未关闭）
+	utils.Info(fmt.Sprintf("[-] [%s] 释放浏览器上下文...", platform))
 
 	// 保存 Cookie
 	if err := c.saveCookie(); err != nil {
-		utils.Warn(fmt.Sprintf("[-] 保存 cookie 失败: %v", err))
+		utils.Warn(fmt.Sprintf("[-] [%s] 保存Cookie失败: %v", platform, err))
+	} else {
+		utils.Info(fmt.Sprintf("[-] [%s] Cookie已保存", platform))
 	}
 
 	// 关闭页面
 	if c.page != nil {
-		c.page.Close()
+		utils.Info(fmt.Sprintf("[-] [%s] 关闭浏览器页面...", platform))
+		if err := c.page.Close(); err != nil {
+			utils.Warn(fmt.Sprintf("[-] [%s] 关闭页面失败: %v", platform, err))
+		} else {
+			utils.Info(fmt.Sprintf("[-] [%s] 浏览器页面已关闭", platform))
+		}
 		c.page = nil
 	}
 
 	c.parent.inUse--
 	c.lastUsed = time.Now()
+
+	utils.Info(fmt.Sprintf("[-] [%s] 浏览器上下文已释放", platform))
 
 	return nil
 }
@@ -396,6 +499,8 @@ func (c *PooledContext) GetPage() (playwright.Page, error) {
 		return c.page, nil
 	}
 
+	utils.Info(fmt.Sprintf("[-] [%s] 创建浏览器页面...", c.platform))
+
 	page, err := c.context.NewPage()
 	if err != nil {
 		return nil, err
@@ -405,10 +510,14 @@ func (c *PooledContext) GetPage() (playwright.Page, error) {
 	page.SetDefaultTimeout(30000) // 30秒
 	page.SetDefaultNavigationTimeout(30000)
 
-	// 视口大小已在创建 context 时设置，这里不再重复设置
-	// 避免与 context 的视口设置冲突
+	// 监听页面关闭事件
+	page.On("close", func() {
+		utils.Info(fmt.Sprintf("[-] [%s] 浏览器页面被关闭（用户操作或系统）", c.platform))
+		c.page = nil
+	})
 
 	c.page = page
+	utils.Info(fmt.Sprintf("[-] [%s] 浏览器页面创建成功", c.platform))
 	return page, nil
 }
 
@@ -424,7 +533,6 @@ func (c *PooledContext) WaitForPageLoad() error {
 }
 
 // IsPageClosed 检查页面是否已关闭
-// 增加重试机制，避免页面导航或短暂中断导致的误判
 func (c *PooledContext) IsPageClosed() bool {
 	if c.page == nil {
 		return true
@@ -473,26 +581,296 @@ func (c *PooledContext) checkPageAlive() bool {
 	return true
 }
 
-// Close 关闭上下文
+// Close 关闭上下文（强制关闭）
 func (c *PooledContext) Close() error {
+	utils.Info(fmt.Sprintf("[-] [%s] 强制关闭浏览器上下文...", c.platform))
+
 	if c.page != nil {
-		c.page.Close()
+		utils.Info(fmt.Sprintf("[-] [%s] 关闭浏览器页面...", c.platform))
+		if err := c.page.Close(); err != nil {
+			utils.Warn(fmt.Sprintf("[-] [%s] 关闭页面失败: %v", c.platform, err))
+		} else {
+			utils.Info(fmt.Sprintf("[-] [%s] 浏览器页面已关闭", c.platform))
+		}
+		c.page = nil
 	}
-	return c.context.Close()
+
+	if err := c.context.Close(); err != nil {
+		utils.Warn(fmt.Sprintf("[-] [%s] 关闭上下文失败: %v", c.platform, err))
+		return err
+	}
+
+	utils.Info(fmt.Sprintf("[-] [%s] 浏览器上下文已关闭", c.platform))
+	return nil
 }
 
 // ClosePage 关闭页面（上传成功后调用）
 func (c *PooledContext) ClosePage() error {
 	if c.page != nil {
-		utils.Info("[-] 关闭浏览器页面")
+		utils.Info(fmt.Sprintf("[-] [%s] 关闭浏览器页面...", c.platform))
 		if err := c.page.Close(); err != nil {
-			utils.Warn(fmt.Sprintf("[-] 关闭页面失败: %v", err))
+			utils.Warn(fmt.Sprintf("[-] [%s] 关闭页面失败: %v", c.platform, err))
 			return err
 		}
 		c.page = nil
-		utils.Info("[-] 浏览器页面已关闭")
+		utils.Info(fmt.Sprintf("[-] [%s] 浏览器页面已关闭", c.platform))
 	}
 	return nil
+}
+
+// ==================== Cookie检测方法 ====================
+
+// WaitForLoginCookies 等待登录Cookie出现
+// 循环检测：「全量获取→映射判空→全量满足即返回」
+func (c *PooledContext) WaitForLoginCookies(config PlatformCookieConfig) error {
+	if c.page == nil {
+		return fmt.Errorf("page not created")
+	}
+
+	checker := NewCookieChecker()
+	return checker.WaitForLoginCookies(context.Background(), c.page, config)
+}
+
+// WaitForLoginCookiesWithContext 带context的等待登录Cookie
+func (c *PooledContext) WaitForLoginCookiesWithContext(ctx context.Context, config PlatformCookieConfig) error {
+	if c.page == nil {
+		return fmt.Errorf("page not created")
+	}
+
+	checker := NewCookieChecker()
+	return checker.WaitForLoginCookies(ctx, c.page, config)
+}
+
+// ValidateLoginCookies 验证当前Cookie是否有效
+func (c *PooledContext) ValidateLoginCookies(config PlatformCookieConfig) (bool, error) {
+	if c.page == nil {
+		return false, fmt.Errorf("page not created")
+	}
+
+	checker := NewCookieChecker()
+	return checker.ValidateLoginCookies(c.page, config)
+}
+
+// GetCookieValues 获取指定Cookie的值
+func (c *PooledContext) GetCookieValues(domain string, names []string) (map[string]string, error) {
+	if c.page == nil {
+		return nil, fmt.Errorf("page not created")
+	}
+
+	checker := NewCookieChecker()
+	return checker.GetCookieValues(c.page, domain, names)
+}
+
+// ==================== 反爬检测方法 ====================
+
+// DetectCaptcha 检测是否出现验证码/滑块
+func (c *PooledContext) DetectCaptcha() (bool, string, error) {
+	if c.page == nil {
+		return false, "", fmt.Errorf("page not created")
+	}
+
+	captchaSelectors := []struct {
+		selector string
+		type_    string
+	}{
+		{".captcha", "验证码"},
+		{"[class*='captcha']", "验证码"},
+		{"[class*='slider']", "滑块验证"},
+		{"[class*='verify']", "验证"},
+		{".geetest", "极验验证"},
+		{"[class*='geetest']", "极验验证"},
+		{"iframe[src*='captcha']", "验证码iframe"},
+		{"iframe[src*='verify']", "验证iframe"},
+		{"text=请完成验证", "文字验证"},
+		{"text=拖动滑块", "滑块验证"},
+		{"text=点击验证", "点击验证"},
+	}
+
+	for _, item := range captchaSelectors {
+		count, err := c.page.Locator(item.selector).Count()
+		if err == nil && count > 0 {
+			visible, _ := c.page.Locator(item.selector).IsVisible()
+			if visible {
+				utils.Warn(fmt.Sprintf("[-] 检测到%s", item.type_))
+				return true, item.type_, nil
+			}
+		}
+	}
+
+	verificationTexts := []string{
+		"请完成安全验证",
+		"请进行验证",
+		"验证失败",
+		"请点击",
+		"请拖动",
+	}
+
+	for _, text := range verificationTexts {
+		count, _ := c.page.GetByText(text).Count()
+		if count > 0 {
+			return true, "验证提示", nil
+		}
+	}
+
+	return false, "", nil
+}
+
+// DetectAntiBot 检测反爬虫标记
+func (c *PooledContext) DetectAntiBot() (bool, string, error) {
+	if c.page == nil {
+		return false, "", fmt.Errorf("page not created")
+	}
+
+	antiBotIndicators := []struct {
+		selector string
+		message  string
+	}{
+		{"text=访问过于频繁", "访问频繁"},
+		{"text=操作过于频繁", "操作频繁"},
+		{"text=请稍后再试", "限流提示"},
+		{"text=系统繁忙", "系统繁忙"},
+		{"text=网络异常", "网络异常"},
+		{"text=账号异常", "账号异常"},
+		{"text=登录异常", "登录异常"},
+		{"text=自动程序", "自动程序检测"},
+		{"text=机器人", "机器人检测"},
+		{"[class*='ban']", "封禁提示"},
+		{"[class*='block']", "拦截提示"},
+	}
+
+	for _, item := range antiBotIndicators {
+		count, err := c.page.Locator(item.selector).Count()
+		if err == nil && count > 0 {
+			visible, _ := c.page.Locator(item.selector).IsVisible()
+			if visible {
+				utils.Warn(fmt.Sprintf("[-] 检测到反爬标记: %s", item.message))
+				return true, item.message, nil
+			}
+		}
+	}
+
+	return false, "", nil
+}
+
+// ==================== 人类行为模拟方法 ====================
+
+// HumanLikeDelay 模拟人类操作的随机延迟
+func (c *PooledContext) HumanLikeDelay(baseDelay time.Duration) {
+	variance := float64(baseDelay) * 0.3
+	delay := baseDelay + time.Duration(rand.Float64()*variance*2-variance)
+	time.Sleep(delay)
+}
+
+// HumanLikeTyping 模拟人类输入（带随机延迟）
+func (c *PooledContext) HumanLikeTyping(text string) error {
+	if c.page == nil {
+		return fmt.Errorf("page not created")
+	}
+
+	for _, char := range text {
+		if err := c.page.Keyboard().Type(string(char)); err != nil {
+			return err
+		}
+		time.Sleep(time.Duration(50+rand.Intn(100)) * time.Millisecond)
+	}
+	return nil
+}
+
+// SimulateHumanBehavior 模拟人类浏览行为
+func (c *PooledContext) SimulateHumanBehavior() error {
+	if c.page == nil {
+		return fmt.Errorf("page not created")
+	}
+
+	// 随机滚动
+	scrollCount := 2 + rand.Intn(3)
+	for i := 0; i < scrollCount; i++ {
+		scrollY := rand.Intn(300) + 100
+		_, err := c.page.Evaluate(fmt.Sprintf("window.scrollBy(0, %d)", scrollY))
+		if err != nil {
+			return err
+		}
+		time.Sleep(time.Duration(500+rand.Intn(500)) * time.Millisecond)
+	}
+
+	// 随机鼠标移动
+	err := c.page.Mouse().Move(float64(rand.Intn(500)+100), float64(rand.Intn(300)+100))
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// SafeGoto 安全导航（带反爬检测）
+func (c *PooledContext) SafeGoto(url string, options ...playwright.PageGotoOptions) error {
+	if c.page == nil {
+		return fmt.Errorf("page not created")
+	}
+
+	// 模拟人类行为前等待
+	c.HumanLikeDelay(500 * time.Millisecond)
+
+	_, err := c.page.Goto(url, options...)
+	if err != nil {
+		return err
+	}
+
+	// 页面加载后模拟人类行为
+	if err := c.SimulateHumanBehavior(); err != nil {
+		utils.Warn(fmt.Sprintf("[-] 模拟人类行为失败: %v", err))
+	}
+
+	// 检测验证码
+	if detected, captchaType, _ := c.DetectCaptcha(); detected {
+		return fmt.Errorf("检测到%s，需要人工处理", captchaType)
+	}
+
+	// 检测反爬
+	if detected, message, _ := c.DetectAntiBot(); detected {
+		return fmt.Errorf("检测到反爬: %s", message)
+	}
+
+	return nil
+}
+
+// SafeClick 安全点击（带随机延迟）
+func (c *PooledContext) SafeClick(selector string) error {
+	if c.page == nil {
+		return fmt.Errorf("page not created")
+	}
+
+	c.HumanLikeDelay(300 * time.Millisecond)
+
+	if err := c.page.Locator(selector).Click(); err != nil {
+		return err
+	}
+
+	c.HumanLikeDelay(200 * time.Millisecond)
+	return nil
+}
+
+// SafeFill 安全填写（模拟人类输入）
+func (c *PooledContext) SafeFill(selector, text string) error {
+	if c.page == nil {
+		return fmt.Errorf("page not created")
+	}
+
+	// 先点击输入框
+	if err := c.SafeClick(selector); err != nil {
+		return err
+	}
+
+	// 清空内容
+	if err := c.page.Keyboard().Press("Control+KeyA"); err != nil {
+		return err
+	}
+	if err := c.page.Keyboard().Press("Delete"); err != nil {
+		return err
+	}
+
+	// 模拟人类输入
+	return c.HumanLikeTyping(text)
 }
 
 // findLocalChrome 查找本地 Chrome
@@ -513,4 +891,8 @@ func findLocalChrome() string {
 		}
 	}
 	return ""
+}
+
+func init() {
+	rand.Seed(time.Now().UnixNano())
 }

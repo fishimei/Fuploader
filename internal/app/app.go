@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -26,24 +27,20 @@ import (
 )
 
 type App struct {
-	ctx                  context.Context
-	accountService       *service.AccountService
-	fileService          *service.FileService
-	uploadService        *service.UploadService
-	scheduleService      *service.ScheduleService
-	logService           *service.LogService
-	screenshotService    *service.ScreenshotService
-	scheduler            *scheduler.Scheduler
-	enhancedScheduler    *scheduler.EnhancedScheduler
-	useEnhancedScheduler bool
-	initialized          bool
-	initError            string
+	ctx               context.Context
+	accountService    *service.AccountService
+	fileService       *service.FileService
+	uploadService     *service.UploadService
+	scheduleService   *service.ScheduleService
+	logService        *service.LogService
+	screenshotService *service.ScreenshotService
+	scheduler         *scheduler.EnhancedScheduler
+	initialized       bool
+	initError         string
 }
 
 func NewApp() *App {
-	return &App{
-		useEnhancedScheduler: true, // 默认使用增强调度器
-	}
+	return &App{}
 }
 
 func (a *App) Startup(ctx context.Context) {
@@ -80,32 +77,25 @@ func (a *App) Startup(ctx context.Context) {
 
 	a.setupEventListeners()
 
-	// 使用增强调度器
-	if a.useEnhancedScheduler {
-		a.setupEnhancedScheduler(db)
-	} else {
-		// 使用旧版调度器作为 fallback
-		a.scheduler = scheduler.NewScheduler(a)
-		a.scheduler.Start()
-		a.scheduler.LoadPendingTasks()
-	}
+	// 设置并启动增强调度器
+	a.setupScheduler(db)
 
 	a.initialized = true
 	utils.Info("Application started successfully")
 }
 
-// setupEnhancedScheduler 设置增强调度器
-func (a *App) setupEnhancedScheduler(db *gorm.DB) {
-	// 创建增强调度器，使用5个工作线程
-	a.enhancedScheduler = scheduler.NewEnhancedScheduler(db, 5)
+// setupScheduler 设置调度器
+func (a *App) setupScheduler(db *gorm.DB) {
+	// 创建调度器，使用5个工作线程
+	a.scheduler = scheduler.NewEnhancedScheduler(db, 5)
 
 	// 注册各平台上传器
 	a.registerUploaders()
 
 	// 启动调度器
-	a.enhancedScheduler.Start()
+	a.scheduler.Start()
 
-	utils.Info("[+] 增强调度器已启动")
+	utils.Info("[+] 调度器已启动")
 }
 
 // registerUploaders 注册各平台上传器
@@ -118,7 +108,7 @@ func (a *App) registerUploaders() {
 	}
 
 	for _, account := range accounts {
-		cookiePath := a.accountService.GetCookiePath(uint(account.ID))
+		cookiePath := a.accountService.GetCookiePath(account.Platform, uint(account.ID))
 		var uploader types.Uploader
 
 		switch account.Platform {
@@ -140,18 +130,18 @@ func (a *App) registerUploaders() {
 		}
 
 		if uploader != nil {
-			a.enhancedScheduler.RegisterUploader(account.Platform, uploader)
+			a.scheduler.RegisterUploader(account.Platform, uploader)
 			utils.Info(fmt.Sprintf("[+] 已注册上传器 - 平台: %s, 账号: %s", account.Platform, account.Name))
 		}
 	}
 }
 
 // GetAppStatus 获取应用初始化状态
-func (a *App) GetAppStatus() (map[string]interface{}, error) {
-	return map[string]interface{}{
-		"initialized": a.initialized,
-		"error":       a.initError,
-		"version":     config.AppVersion,
+func (a *App) GetAppStatus() (*types.AppStatus, error) {
+	return &types.AppStatus{
+		Initialized: a.initialized,
+		Error:       a.initError,
+		Version:     config.AppVersion,
 	}, nil
 }
 
@@ -163,13 +153,9 @@ func (a *App) Shutdown(ctx context.Context) {
 	defer cancel()
 
 	// 停止调度器
-	if a.enhancedScheduler != nil {
-		a.enhancedScheduler.Stop()
-		utils.Info("[-] 增强调度器已停止")
-	}
 	if a.scheduler != nil {
 		a.scheduler.Stop()
-		utils.Info("[-] 旧版调度器已停止")
+		utils.Info("[-] 调度器已停止")
 	}
 
 	// 等待所有任务完成或超时
@@ -201,7 +187,7 @@ func (a *App) ExecuteTask(taskID int) error {
 	return nil
 }
 
-func (a *App) emitEvent(eventName string, data interface{}) {
+func (a *App) emitEvent(eventName string, data types.Event) {
 	if a.ctx == nil {
 		return
 	}
@@ -211,25 +197,25 @@ func (a *App) emitEvent(eventName string, data interface{}) {
 func (a *App) setupEventListeners() {
 	eventBus := a.uploadService.GetEventBus()
 
-	eventBus.Subscribe(config.EventUploadProgress, func(data interface{}) {
+	eventBus.Subscribe(config.EventUploadProgress, func(data types.Event) {
 		if progress, ok := data.(types.UploadProgressEvent); ok {
 			a.emitEvent(config.EventUploadProgress, progress)
 		}
 	})
 
-	eventBus.Subscribe(config.EventUploadComplete, func(data interface{}) {
+	eventBus.Subscribe(config.EventUploadComplete, func(data types.Event) {
 		if result, ok := data.(types.UploadCompleteEvent); ok {
 			a.emitEvent(config.EventUploadComplete, result)
 		}
 	})
 
-	eventBus.Subscribe(config.EventUploadError, func(data interface{}) {
+	eventBus.Subscribe(config.EventUploadError, func(data types.Event) {
 		if result, ok := data.(types.UploadErrorEvent); ok {
 			a.emitEvent(config.EventUploadError, result)
 		}
 	})
 
-	eventBus.Subscribe(config.EventTaskStatusChanged, func(data interface{}) {
+	eventBus.Subscribe(config.EventTaskStatusChanged, func(data types.Event) {
 		if eventData, ok := data.(types.TaskStatusChangedEvent); ok {
 			a.emitEvent(config.EventTaskStatusChanged, eventData)
 		}
@@ -307,7 +293,65 @@ func (a *App) LoginAccount(id int) error {
 	})
 
 	// 登录成功后，重新注册上传器
-	if a.enhancedScheduler != nil {
+	if a.scheduler != nil {
+		a.registerUploaders()
+	}
+
+	return nil
+}
+
+func (a *App) ReloginAccount(id int) error {
+	account, err := a.accountService.GetAccounts(a.ctx)
+	if err != nil {
+		a.emitEvent(config.EventLoginError, types.LoginErrorEvent{
+			AccountID: id,
+			Platform:  "",
+			Error:     "failed to get accounts",
+		})
+		return fmt.Errorf("failed to get accounts: %w", err)
+	}
+
+	var targetAccount *database.Account
+	for i := range account {
+		if account[i].ID == id {
+			targetAccount = &account[i]
+			break
+		}
+	}
+
+	if targetAccount == nil {
+		a.emitEvent(config.EventLoginError, types.LoginErrorEvent{
+			AccountID: id,
+			Platform:  "",
+			Error:     "account not found",
+		})
+		return fmt.Errorf("account not found")
+	}
+
+	err = a.accountService.ReloginAccount(a.ctx, id)
+	if err != nil {
+		a.emitEvent(config.EventLoginError, types.LoginErrorEvent{
+			AccountID: id,
+			Platform:  targetAccount.Platform,
+			Error:     err.Error(),
+		})
+		return err
+	}
+
+	a.emitEvent(config.EventLoginSuccess, types.LoginSuccessEvent{
+		AccountID: id,
+		Platform:  targetAccount.Platform,
+		Username:  targetAccount.Username,
+	})
+
+	a.emitEvent(config.EventAccountStatusChanged, types.AccountStatusChangedEvent{
+		AccountID: id,
+		OldStatus: targetAccount.Status,
+		NewStatus: config.AccountStatusValid,
+	})
+
+	// 登录成功后，重新注册上传器
+	if a.scheduler != nil {
 		a.registerUploaders()
 	}
 
@@ -345,7 +389,177 @@ func (a *App) CreateUploadTask(
 		}
 	}
 
-	return a.uploadService.CreateUploadTask(a.ctx, videoID, accountIDs, scheduleTime, taskMetadata)
+	// 如果设置了定时时间，直接创建上传任务（立即执行，由平台处理定时发布）
+	if scheduleTime != nil && *scheduleTime != "" {
+		return a.uploadService.CreateUploadTask(a.ctx, videoID, accountIDs, scheduleTime, taskMetadata)
+	}
+
+	return a.uploadService.CreateUploadTask(a.ctx, videoID, accountIDs, nil, taskMetadata)
+}
+
+// createScheduledTasks 创建定时任务
+func (a *App) createScheduledTasks(
+	videoID int,
+	accountIDs []int,
+	scheduleTimeStr string,
+	metadata *service.UploadTaskMetadata,
+) ([]database.UploadTask, error) {
+	// 获取视频信息
+	videos, err := a.fileService.GetVideos(a.ctx)
+	if err != nil {
+		return nil, fmt.Errorf("获取视频列表失败: %w", err)
+	}
+
+	var video *database.Video
+	for i := range videos {
+		if videos[i].ID == videoID {
+			video = &videos[i]
+			break
+		}
+	}
+	if video == nil {
+		return nil, fmt.Errorf("视频不存在 (ID: %d)", videoID)
+	}
+
+	// 解析定时时间
+	scheduleTime, err := time.Parse(time.RFC3339, scheduleTimeStr)
+	if err != nil {
+		// 尝试前端格式: 2006-01-02T15:04:05
+		scheduleTime, err = time.Parse("2006-01-02T15:04:05", scheduleTimeStr)
+		if err != nil {
+			// 尝试其他格式: 2006-01-02 15:04
+			scheduleTime, err = time.Parse("2006-01-02 15:04", scheduleTimeStr)
+			if err != nil {
+				return nil, fmt.Errorf("定时时间格式错误: %w", err)
+			}
+		}
+	}
+
+	// 验证时间范围（≥2小时且≤15天）
+	now := time.Now()
+	minTime := now.Add(2 * time.Hour)
+	maxTime := now.Add(15 * 24 * time.Hour)
+
+	if scheduleTime.Before(minTime) {
+		return nil, fmt.Errorf("定时时间必须至少提前2小时")
+	}
+	if scheduleTime.After(maxTime) {
+		return nil, fmt.Errorf("定时时间不能超过15天")
+	}
+
+	var tasks []database.UploadTask
+	var errors []string
+
+	for _, accountID := range accountIDs {
+		account, err := a.accountService.GetAccountByID(a.ctx, accountID)
+		if err != nil {
+			errMsg := fmt.Sprintf("获取账号 %d 失败: %v", accountID, err)
+			utils.Warn(fmt.Sprintf("[-] %s", errMsg))
+			errors = append(errors, errMsg)
+			continue
+		}
+
+		// 构建任务标题
+		title := video.Title
+		if metadata != nil && metadata.Common.Title != "" {
+			title = metadata.Common.Title
+		}
+
+		// 应用平台特定字段
+		platformFields := types.PlatformFields{}
+		if metadata != nil && metadata.Platforms != nil {
+			if pf, ok := metadata.Platforms[account.Platform]; ok {
+				platformFields = pf
+				if pf.Title != "" {
+					title = pf.Title
+				}
+			}
+		}
+
+		// 创建定时任务
+		scheduledTask := &database.ScheduledTask{
+			ID:           fmt.Sprintf("task_%d_%d_%d", videoID, accountID, time.Now().Unix()),
+			AccountID:    uint(accountID),
+			Platform:     account.Platform,
+			VideoPath:    video.FilePath,
+			Title:        title,
+			Description:  video.Description,
+			Tags:         joinTags(video.Tags),
+			ScheduleTime: scheduleTime,
+			Status:       database.TaskStatusPending,
+			Priority:     database.PriorityNormal,
+			MaxRetries:   3,
+		}
+
+		// 添加到调度器
+		if err := a.scheduler.AddTask(scheduledTask); err != nil {
+			errMsg := fmt.Sprintf("添加定时任务到调度器失败 (账号: %s): %v", account.Name, err)
+			utils.Warn(fmt.Sprintf("[-] %s", errMsg))
+			errors = append(errors, errMsg)
+			continue
+		}
+
+		// 同时创建 UploadTask 用于前端展示
+		uploadTask := database.UploadTask{
+			VideoID:      videoID,
+			AccountID:    accountID,
+			Platform:     account.Platform,
+			Status:       config.TaskStatusPending,
+			Progress:     0,
+			ScheduleTime: &scheduleTimeStr,
+			Title:        title,
+		}
+		// 应用平台特定字段
+		if platformFields.Collection != "" {
+			uploadTask.Collection = platformFields.Collection
+		}
+		if platformFields.Thumbnail != "" {
+			uploadTask.Thumbnail = platformFields.Thumbnail
+		}
+		uploadTask.IsOriginal = platformFields.IsOriginal
+		uploadTask.IsDraft = platformFields.IsDraft
+
+		// 保存到数据库
+		if err := database.DB.Create(&uploadTask).Error; err != nil {
+			errMsg := fmt.Sprintf("创建上传任务记录失败 (账号: %s): %v", account.Name, err)
+			utils.Warn(fmt.Sprintf("[-] %s", errMsg))
+			errors = append(errors, errMsg)
+			continue
+		}
+
+		tasks = append(tasks, uploadTask)
+		utils.Info(fmt.Sprintf("[+] 定时任务已创建 - 视频: %s, 平台: %s, 时间: %s", video.Title, account.Platform, scheduleTimeStr))
+	}
+
+	// 如果没有成功创建任何任务，返回错误
+	if len(tasks) == 0 {
+		if len(errors) > 0 {
+			return nil, fmt.Errorf("创建任务失败: %s", strings.Join(errors, "; "))
+		}
+		return nil, fmt.Errorf("没有成功创建任何任务")
+	}
+
+	// 如果部分成功，记录警告
+	if len(errors) > 0 {
+		utils.Warn(fmt.Sprintf("[-] 部分任务创建失败: %s", strings.Join(errors, "; ")))
+	}
+
+	return tasks, nil
+}
+
+// joinTags 将标签数组拼接为字符串
+func joinTags(tags []string) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	result := ""
+	for i, tag := range tags {
+		if i > 0 {
+			result += ","
+		}
+		result += tag
+	}
+	return result
 }
 
 func (a *App) GetUploadTasks(status string) ([]database.UploadTask, error) {
@@ -440,60 +654,140 @@ func (a *App) OpenDirectory(path string) error {
 // ============================================
 
 // GetCollections 获取平台合集列表（视频号）
-func (a *App) GetCollections(platform string) ([]map[string]string, error) {
+func (a *App) GetCollections(platform string) ([]types.Collection, error) {
 	// TODO: 实现获取合集列表逻辑
 	// 这里需要根据平台调用相应的上传器获取合集
 	utils.Info(fmt.Sprintf("[-] 获取 %s 合集列表", platform))
 
 	// 返回模拟数据，实际实现需要从平台获取
-	return []map[string]string{
-		{"label": "默认合集", "value": "default"},
-		{"label": "测试合集", "value": "test"},
+	return []types.Collection{
+		{Label: "默认合集", Value: "default"},
+		{Label: "测试合集", Value: "test"},
 	}, nil
 }
 
-// AutoSelectCover 自动选择推荐封面（抖音）
-func (a *App) AutoSelectCover(videoID int) (map[string]string, error) {
-	utils.Info(fmt.Sprintf("[-] 为视频 %d 自动选择推荐封面", videoID))
+// AutoSelectCover 自动选择推荐封面（从视频第一帧提取）
+func (a *App) AutoSelectCover(videoID int) (*types.CoverInfo, error) {
+	utils.Info(fmt.Sprintf("[-] 为视频 %d 自动选择封面", videoID))
 
-	// 获取视频信息
+	thumbnailPath, err := a.fileService.ExtractAndSaveThumbnail(a.ctx, videoID, 0)
+	if err != nil {
+		return nil, fmt.Errorf("提取封面失败: %w", err)
+	}
+
+	return &types.CoverInfo{
+		ThumbnailPath: thumbnailPath,
+	}, nil
+}
+
+// ExtractVideoFrame 从视频指定时间提取帧作为封面
+func (a *App) ExtractVideoFrame(videoID int, timeSeconds int) (*types.CoverInfo, error) {
+	utils.Info(fmt.Sprintf("[-] 从视频 %d 的 %d 秒处提取封面", videoID, timeSeconds))
+
+	// 先获取视频信息
+	video, err := a.fileService.GetVideoByID(a.ctx, videoID)
+	if err != nil {
+		utils.Error(fmt.Sprintf("[-] 获取视频信息失败: %v", err))
+		return nil, fmt.Errorf("获取视频信息失败: %w", err)
+	}
+
+	utils.Info(fmt.Sprintf("[-] 视频路径: %s", video.FilePath))
+
+	// 检查视频文件是否存在
+	if _, err := os.Stat(video.FilePath); os.IsNotExist(err) {
+		utils.Error(fmt.Sprintf("[-] 视频文件不存在: %s", video.FilePath))
+		return nil, fmt.Errorf("视频文件不存在: %s", video.FilePath)
+	}
+
+	thumbnailPath, err := a.fileService.ExtractAndSaveThumbnail(a.ctx, videoID, timeSeconds)
+	if err != nil {
+		utils.Error(fmt.Sprintf("[-] 提取视频帧失败: %v", err))
+		return nil, fmt.Errorf("提取视频帧失败: %w", err)
+	}
+
+	utils.Info(fmt.Sprintf("[-] 封面提取成功: %s", thumbnailPath))
+
+	return &types.CoverInfo{
+		ThumbnailPath: thumbnailPath,
+	}, nil
+}
+
+// UploadThumbnail 上传本地图片作为封面
+func (a *App) UploadThumbnail(videoID int, sourcePath string) (*types.CoverInfo, error) {
+	utils.Info(fmt.Sprintf("[-] 为视频 %d 上传封面: %s", videoID, sourcePath))
+
+	if sourcePath == "" {
+		return nil, fmt.Errorf("封面路径不能为空")
+	}
+
+	thumbnailPath, err := a.fileService.SaveThumbnail(videoID, sourcePath)
+	if err != nil {
+		return nil, fmt.Errorf("保存封面失败: %w", err)
+	}
+
 	video, err := a.fileService.GetVideoByID(a.ctx, videoID)
 	if err != nil {
 		return nil, fmt.Errorf("获取视频信息失败: %w", err)
 	}
 
-	// TODO: 实际实现需要从视频中提取帧作为封面
-	// 这里返回视频路径作为占位符
-	return map[string]string{
-		"thumbnailPath": video.FilePath,
+	video.Thumbnail = thumbnailPath
+	if err := a.fileService.UpdateVideo(a.ctx, video); err != nil {
+		return nil, fmt.Errorf("更新视频封面失败: %w", err)
+	}
+
+	return &types.CoverInfo{
+		ThumbnailPath: thumbnailPath,
 	}, nil
 }
 
+// ClearThumbnail 清除视频封面
+func (a *App) ClearThumbnail(videoID int) error {
+	utils.Info(fmt.Sprintf("[-] 清除视频 %d 的封面", videoID))
+
+	video, err := a.fileService.GetVideoByID(a.ctx, videoID)
+	if err != nil {
+		return fmt.Errorf("获取视频信息失败: %w", err)
+	}
+
+	if video.Thumbnail != "" {
+		if err := os.Remove(video.Thumbnail); err != nil && !os.IsNotExist(err) {
+			utils.Error(fmt.Sprintf("删除封面文件失败: %v", err))
+		}
+	}
+
+	video.Thumbnail = ""
+	if err := a.fileService.UpdateVideo(a.ctx, video); err != nil {
+		return fmt.Errorf("清除视频封面失败: %w", err)
+	}
+
+	return nil
+}
+
 // ValidateProductLink 验证商品链接（抖音）
-func (a *App) ValidateProductLink(link string) (map[string]interface{}, error) {
+func (a *App) ValidateProductLink(link string) (*types.ProductLinkValidationResult, error) {
 	utils.Info(fmt.Sprintf("[-] 验证商品链接: %s", link))
 
 	// 简单的链接格式验证
 	if link == "" {
-		return map[string]interface{}{
-			"valid": false,
-			"error": "链接不能为空",
+		return &types.ProductLinkValidationResult{
+			Valid: false,
+			Error: "链接不能为空",
 		}, nil
 	}
 
 	// 检查链接格式
 	if !strings.HasPrefix(link, "http://") && !strings.HasPrefix(link, "https://") {
-		return map[string]interface{}{
-			"valid": false,
-			"error": "链接格式不正确，必须以 http:// 或 https:// 开头",
+		return &types.ProductLinkValidationResult{
+			Valid: false,
+			Error: "链接格式不正确，必须以 http:// 或 https:// 开头",
 		}, nil
 	}
 
 	// TODO: 实际实现需要调用抖音API验证链接有效性
 	// 这里返回模拟成功结果
-	return map[string]interface{}{
-		"valid": true,
-		"title": "商品标题（待获取）",
+	return &types.ProductLinkValidationResult{
+		Valid: true,
+		Title: "商品标题（待获取）",
 	}, nil
 }
 
@@ -555,7 +849,32 @@ func (a *App) GetLogs(query types.LogQuery) ([]types.SimpleLog, error) {
 
 // AddLog 添加日志（供内部使用）
 func (a *App) AddLog(message string) {
-	a.logService.Add(message)
+	a.logService.Add(types.SimpleLog{
+		Date:    time.Now().Format("2006/1/2"),
+		Time:    time.Now().Format("15:04:05"),
+		Message: message,
+		Level:   types.LogLevelInfo,
+	})
+}
+
+// SetLogDedupEnabled 设置日志归并开关
+func (a *App) SetLogDedupEnabled(enabled bool) {
+	a.logService.SetDedupEnabled(enabled)
+	if enabled {
+		utils.Info("[+] 日志归并已启用")
+	} else {
+		utils.Info("[-] 日志归并已禁用")
+	}
+}
+
+// IsLogDedupEnabled 获取日志归并状态
+func (a *App) IsLogDedupEnabled() bool {
+	return a.logService.IsDedupEnabled()
+}
+
+// GetLogPlatforms 获取所有有日志的平台列表
+func (a *App) GetLogPlatforms() []string {
+	return a.logService.GetPlatforms()
 }
 
 // ============================================
@@ -606,4 +925,30 @@ func (a *App) CleanOldScreenshots() (int, error) {
 func (a *App) OpenScreenshotDir(platform string) error {
 	dir := a.screenshotService.GetScreenshotDir(platform)
 	return a.OpenDirectory(dir)
+}
+
+// ============================================
+// 浏览器无头模式配置 API
+// ============================================
+
+// GetHeadlessConfig 获取浏览器无头模式配置
+func (a *App) GetHeadlessConfig() (bool, error) {
+	return config.Config.Headless, nil
+}
+
+// SetHeadlessConfig 设置浏览器无头模式配置
+func (a *App) SetHeadlessConfig(headless bool) error {
+	config.Config.Headless = headless
+	// 设置环境变量使配置持久化到新进程
+	if headless {
+		os.Setenv("FUPLOADER_HEADLESS", "true")
+	} else {
+		os.Setenv("FUPLOADER_HEADLESS", "false")
+	}
+	if headless {
+		utils.Info("[+] 浏览器无头模式已启用")
+	} else {
+		utils.Info("[-] 浏览器无头模式已禁用")
+	}
+	return nil
 }

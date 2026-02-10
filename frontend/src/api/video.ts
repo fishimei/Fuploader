@@ -3,9 +3,13 @@ import {
   AddVideo,
   UpdateVideo,
   DeleteVideo,
-  SelectVideoFile
+  SelectVideoFile,
+  SelectImageFile,
+  ExtractVideoFrame,
+  UploadThumbnail,
+  ClearThumbnail
 } from '../../wailsjs/go/app/App'
-import type { Video } from '../types'
+import type { Video, CoverInfo } from '../types'
 
 // 获取视频列表
 export async function getVideos(): Promise<Video[]> {
@@ -64,6 +68,49 @@ export async function selectVideoFile(): Promise<string> {
     return filePath || ''
   } catch (error) {
     console.error('选择视频文件失败:', error)
+    throw error
+  }
+}
+
+// 选择图片文件
+export async function selectImageFile(): Promise<string> {
+  try {
+    const filePath = await SelectImageFile()
+    return filePath || ''
+  } catch (error) {
+    console.error('选择图片文件失败:', error)
+    throw error
+  }
+}
+
+// 从视频提取帧作为封面
+export async function extractVideoFrame(videoID: number, timeSeconds: number): Promise<CoverInfo> {
+  try {
+    const result = await ExtractVideoFrame(videoID, timeSeconds)
+    return result as CoverInfo
+  } catch (error) {
+    console.error('提取视频帧失败:', error)
+    throw error
+  }
+}
+
+// 上传本地图片作为封面
+export async function uploadThumbnail(videoID: number, sourcePath: string): Promise<CoverInfo> {
+  try {
+    const result = await UploadThumbnail(videoID, sourcePath)
+    return result as CoverInfo
+  } catch (error) {
+    console.error('上传封面失败:', error)
+    throw error
+  }
+}
+
+// 清除视频封面
+export async function clearThumbnail(videoID: number): Promise<void> {
+  try {
+    await ClearThumbnail(videoID)
+  } catch (error) {
+    console.error('清除封面失败:', error)
     throw error
   }
 }

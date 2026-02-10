@@ -4,486 +4,696 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"strings"
 	"time"
 
+	"Fuploader/internal/config"
 	"Fuploader/internal/platform/browser"
-	"Fuploader/internal/platform/uploader"
 	"Fuploader/internal/types"
 	"Fuploader/internal/utils"
 
 	"github.com/playwright-community/playwright-go"
 )
 
+// debugLog 调试日志输出，仅在调试模式下显示
+func debugLog(format string, args ...interface{}) {
+	if config.Config != nil && config.Config.DebugMode {
+		utils.InfoWithPlatform("baijiahao", fmt.Sprintf("[调试] "+format, args...))
+	}
+}
+
 // browserPool 全局浏览器池实例
 var browserPool *browser.Pool
 
-// initBrowserPool 初始化浏览器池
-func initBrowserPool() {
-	if browserPool == nil {
-		browserPool = browser.NewPool(2, 5) // 最多2个浏览器，每个5个上下文
-	}
+func init() {
+	browserPool = browser.NewPool(2, 5)
 }
 
 // Uploader 百家号上传器
 type Uploader struct {
-	*uploader.Base
+	cookiePath string
+	platform   string
 }
 
 // NewUploader 创建上传器
 func NewUploader(cookiePath string) *Uploader {
-	initBrowserPool()
-	return &Uploader{
-		Base: uploader.NewBase("baijiahao", cookiePath, browserPool),
+	u := &Uploader{
+		cookiePath: cookiePath,
+		platform:   "baijiahao",
 	}
+	debugLog("创建上传器 - 地址: %p, cookiePath: '%s'", u, cookiePath)
+	if cookiePath == "" {
+		utils.Warn("[Baijiahao] NewUploader 收到空的cookiePath!")
+	}
+	return u
 }
 
 // Platform 返回平台名称
 func (u *Uploader) Platform() string {
-	return "baijiahao"
+	return u.platform
 }
 
-// ValidateCookie 验证 Cookie 是否有效
-// 参照Python版本：访问首页，等待5秒，检测"注册/登录百家号"文字
+// ValidateCookie 验证Cookie是否有效
 func (u *Uploader) ValidateCookie(ctx context.Context) (bool, error) {
-	// 从浏览器池获取上下文
-	browserCtx, err := browserPool.GetContext(ctx, u.GetCookiePath(), u.GetContextOptions())
+	utils.InfoWithPlatform(u.platform, "验证Cookie")
+
+	if _, err := os.Stat(u.cookiePath); os.IsNotExist(err) {
+		utils.WarnWithPlatform(u.platform, "Cookie文件不存在")
+		return false, nil
+	}
+
+	browserCtx, err := browserPool.GetContext(ctx, u.cookiePath, nil)
 	if err != nil {
-		return false, fmt.Errorf("get browser context failed: %w", err)
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("获取浏览器失败: %v", err))
+		return false, nil
 	}
 	defer browserCtx.Release()
 
 	page, err := browserCtx.GetPage()
 	if err != nil {
-		return false, fmt.Errorf("get page failed: %w", err)
-	}
-
-	// 访问百家号创作者中心首页
-	utils.Info("[-] 正在验证百家号登录状态...")
-	if _, err := page.Goto("https://baijiahao.baidu.com/builder/rc/home"); err != nil {
-		return false, fmt.Errorf("goto home page failed: %w", err)
-	}
-
-	// 等待5秒（与Python版本一致）
-	time.Sleep(5 * time.Second)
-
-	// 检测是否有"注册/登录百家号"文字（Python版本核心逻辑）
-	loginTextCount, _ := page.GetByText("注册/登录百家号").Count()
-	if loginTextCount > 0 {
-		utils.Info("[-] 检测到'注册/登录百家号'，Cookie 失效")
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("获取页面失败: %v", err))
 		return false, nil
 	}
 
-	utils.Info("[-] Cookie 有效")
-	return true, nil
+	if _, err := page.Goto("https://baijiahao.baidu.com/builder/rc/home", playwright.PageGotoOptions{
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
+	}); err != nil {
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("打开页面失败: %v", err))
+		return false, nil
+	}
+
+	time.Sleep(5 * time.Second)
+
+	// 使用Cookie检测机制验证登录状态
+	cookieConfig, ok := browser.GetCookieConfig("baijiahao")
+	if !ok {
+		return false, fmt.Errorf("获取百家号Cookie配置失败")
+	}
+
+	isValid, err := browserCtx.ValidateLoginCookies(cookieConfig)
+	if err != nil {
+		return false, fmt.Errorf("验证Cookie失败: %w", err)
+	}
+
+	if isValid {
+		utils.InfoWithPlatform(u.platform, "检测到PTOKEN和BAIDUID Cookie，验证通过")
+	} else {
+		utils.InfoWithPlatform(u.platform, "未检测到PTOKEN和BAIDUID Cookie，验证失败")
+	}
+
+	return isValid, nil
 }
 
 // Upload 上传视频
 func (u *Uploader) Upload(ctx context.Context, task *types.VideoTask) error {
-	steps := []uploader.StepFunc{
-		// 1. 导航到发布页面 - 参照Python版本直接访问edit页面
-		u.StepNavigate("https://baijiahao.baidu.com/builder/rc/edit?type=videoV2"),
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("开始上传: %s", task.VideoPath))
 
-		// 2. 等待页面加载并上传视频
-		u.StepUploadBaijiahaoVideo(task.VideoPath),
-
-		// 3. 等待封面生成完成
-		u.StepWaitCoverGenerated(),
-
-		// 4. 填写标题、简介和标签
-		u.StepFillBaijiahaoContent(task.Title, task.Description, task.Tags),
-
-		// 5. 设置定时发布（如果有）
-		u.StepSetScheduleBaijiahao(task.ScheduleTime),
-
-		// 6. 检测安全验证
-		u.StepCheckSecurityVerification(),
-
-		// 7. 点击发布
-		u.StepClickPublishBaijiahao(),
+	if _, err := os.Stat(task.VideoPath); err != nil {
+		return fmt.Errorf("视频文件不存在: %w", err)
 	}
 
-	return u.Execute(ctx, task, steps)
-}
-
-// StepUploadBaijiahaoVideo 百家号上传视频步骤
-func (u *Uploader) StepUploadBaijiahaoVideo(videoPath string) uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		// 等待页面完全加载
-		utils.Info("[-] 等待发布页面加载...")
-		time.Sleep(3 * time.Second)
-
-		// 检查是否进入视频发布页面
-		maxWait := 30
-		for i := 0; i < maxWait; i++ {
-			// 检查页面URL
-			currentURL := ctx.Page.URL()
-			if strings.Contains(currentURL, "edit?type=videoV2") {
-				// 检查是否有视频上传输入框
-				inputCount, _ := ctx.Page.Locator("div[class^='video-main-container'] input, input[type='file']").Count()
-				if inputCount > 0 {
-					utils.Info("[-] 已进入视频发布页面")
-					break
-				}
-			}
-			
-			// 检查是否有"注册/登录百家号"文字（未登录）
-			loginTextCount, _ := ctx.Page.GetByText("注册/登录百家号").Count()
-			if loginTextCount > 0 {
-				return uploader.StepResult{Step: uploader.StepUploadMedia, Success: false, Error: fmt.Errorf("未登录，请先登录百家号")}
-			}
-			
-			utils.Info(fmt.Sprintf("[-] 正在等待进入视频发布页面... (%d/%d)", i+1, maxWait))
-			time.Sleep(1 * time.Second)
-		}
-
-		// 上传视频文件 - 参照Python版本的选择器
-		utils.Info("[-] 正在上传视频...")
-		inputLocator := ctx.Page.Locator("div[class^='video-main-container'] input").First()
-		if err := inputLocator.SetInputFiles(videoPath); err != nil {
-			// 尝试备用选择器
-			inputLocator = ctx.Page.Locator("input[type='file']").First()
-			if err := inputLocator.SetInputFiles(videoPath); err != nil {
-				return uploader.StepResult{Step: uploader.StepUploadMedia, Success: false, Error: fmt.Errorf("set input files failed: %w", err)}
-			}
-		}
-
-		// 等待上传完成
-		timeout := time.After(5 * time.Minute)
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-timeout:
-				return uploader.StepResult{Step: uploader.StepUploadMedia, Success: false, Error: fmt.Errorf("upload timeout")}
-			case <-ticker.C:
-				// 检查上传失败
-				failCount, _ := ctx.Page.Locator("div .cover-overlay:has-text('上传失败')").Count()
-				if failCount > 0 {
-					return uploader.StepResult{Step: uploader.StepUploadMedia, Success: false, Error: fmt.Errorf("upload failed")}
-				}
-				
-				// 检查上传完成（Python版本逻辑）
-				uploadingCount, _ := ctx.Page.Locator("div .cover-overlay:has-text('上传中')").Count()
-				if uploadingCount == 0 {
-					// 再检查是否有上传完成的标志
-					formVisible, _ := ctx.Page.Locator("div#formMain:visible").Count()
-					if formVisible > 0 {
-						utils.Info("[-] 视频上传完成")
-						return uploader.StepResult{Step: uploader.StepUploadMedia, Success: true}
-					}
-				}
-				utils.Info("[-] 正在上传视频中...")
-			}
-		}
-	}
-}
-
-// StepFillBaijiahaoContent 百家号填写内容步骤
-func (u *Uploader) StepFillBaijiahaoContent(title, description string, tags []string) uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		// 标题优化：如果标题少于等于8个字，自动补充（参照Python版本）
-		optimizedTitle := title
-		if len(title) <= 8 {
-			optimizedTitle = title + " 你不知道的"
-			utils.Info(fmt.Sprintf("[-] 标题优化：原标题过短，已优化为: %s", optimizedTitle))
-		}
-
-		// 限制标题长度不超过30个字符（参照Python版本）
-		if len(optimizedTitle) > 30 {
-			optimizedTitle = optimizedTitle[:30]
-		}
-
-		// 设置标题 - 参照Python版本使用placeholder定位
-		titleInput := ctx.Page.GetByPlaceholder("添加标题获得更多推荐")
-		if err := titleInput.Fill(optimizedTitle); err != nil {
-			// 尝试备用选择器
-			titleInput = ctx.Page.Locator("input[placeholder*=\"标题\"], textarea[placeholder*=\"标题\"]").First()
-			if err := titleInput.Fill(optimizedTitle); err != nil {
-				return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: fmt.Errorf("fill title failed: %w", err)}
-			}
-		}
-
-		// 填写简介（正文）
-		if description != "" {
-			descInput := ctx.Page.Locator("div[contenteditable=true], textarea[placeholder*=\"正文\"], textarea[placeholder*=\"内容\"]").First()
-			if err := descInput.Fill(description); err != nil {
-				utils.Warn(fmt.Sprintf("[-] 填写简介失败（可能是富文本编辑器）: %v", err))
-			}
-		}
-
-		// 添加话题标签
-		for _, tag := range tags {
-			if err := ctx.Page.Keyboard().Type("#" + tag + " "); err != nil {
-				return uploader.StepResult{Step: uploader.StepAddTags, Success: false, Error: fmt.Errorf("type tag failed: %w", err)}
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-
-		return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-	}
-}
-
-// StepWaitCoverGenerated 等待封面生成完成
-func (u *Uploader) StepWaitCoverGenerated() uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		ctx.ReportProgress(uploader.StepSetCover, 55, "等待封面生成...")
-
-		timeout := time.After(2 * time.Minute)
-		ticker := time.NewTicker(3 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-timeout:
-				return uploader.StepResult{Step: uploader.StepSetCover, Success: false, Error: fmt.Errorf("cover generation timeout")}
-			case <-ticker.C:
-				// 参照Python版本检测封面生成
-				count, _ := ctx.Page.Locator("div.cheetah-spin-container img").Count()
-				if count > 0 {
-					ctx.ReportProgress(uploader.StepSetCover, 60, "封面生成完成")
-					return uploader.StepResult{Step: uploader.StepSetCover, Success: true}
-				}
-				utils.Info("[-] 等待封面生成...")
-			}
-		}
-	}
-}
-
-// StepSetScheduleBaijiahao 百家号设置定时发布步骤
-// 参照Python版本实现下拉选择方式
-func (u *Uploader) StepSetScheduleBaijiahao(scheduleTime *string) uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		if scheduleTime == nil || *scheduleTime == "" {
-			return uploader.StepResult{Step: uploader.StepSetSchedule, Success: true}
-		}
-
-		// 解析时间
-		schedule, err := time.Parse("2006-01-02T15:04", *scheduleTime)
-		if err != nil {
-			return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("parse schedule time failed: %w", err)}
-		}
-
-		// 点击定时发布
-		if err := ctx.Page.GetByText("定时发布").Click(); err != nil {
-			return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("click schedule failed: %w", err)}
-		}
-		time.Sleep(2 * time.Second)
-
-		// 参照Python版本：选择日期
-		publishDateDay := fmt.Sprintf("%d月%d日", schedule.Month(), schedule.Day())
-		if schedule.Day() < 10 {
-			publishDateDay = fmt.Sprintf("%d月0%d日", schedule.Month(), schedule.Day())
-		}
-
-		// 点击日期选择框
-		for retry := 0; retry < 3; retry++ {
-			selectWrap := ctx.Page.Locator("div.select-wrap").Nth(0)
-			if err := selectWrap.Click(); err != nil {
-				if retry == 2 {
-					return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("click date selector failed: %w", err)}
-				}
-				continue
-			}
-			time.Sleep(1 * time.Second)
-
-			// 选择日期
-			dateOption := ctx.Page.Locator(fmt.Sprintf("div.rc-virtual-list div.cheetah-select-item:has-text('%s')", publishDateDay))
-			if err := dateOption.Click(); err != nil {
-				if retry == 2 {
-					utils.Warn(fmt.Sprintf("[-] 选择日期失败，使用默认日期: %v", err))
-				} else {
-					continue
-				}
-			}
-			break
-		}
-		time.Sleep(1 * time.Second)
-
-		// 参照Python版本：随机选择小时（因为Python版本注释说时间选择不准确，目前是随机）
-		for retry := 0; retry < 3; retry++ {
-			hourWrap := ctx.Page.Locator("div.select-wrap").Nth(1)
-			if err := hourWrap.Click(); err != nil {
-				if retry == 2 {
-					return uploader.StepResult{Step: uploader.StepSetSchedule, Success: false, Error: fmt.Errorf("click hour selector failed: %w", err)}
-				}
-				continue
-			}
-			time.Sleep(1 * time.Second)
-
-			// 获取可选小时数量
-			hourOptions, _ := ctx.Page.Locator("div.rc-virtual-list:visible div.cheetah-select-item-option").Count()
-			if hourOptions > 0 {
-				// 随机选择一个（参照Python版本）
-				randomHour := rand.Intn(hourOptions-3) + 1
-				if randomHour >= hourOptions {
-					randomHour = hourOptions - 1
-				}
-				hourOption := ctx.Page.Locator("div.rc-virtual-list:visible div.cheetah-select-item-option").Nth(randomHour)
-				if err := hourOption.Click(); err != nil {
-					utils.Warn(fmt.Sprintf("[-] 选择小时失败: %v", err))
-				}
-			}
-			break
-		}
-		time.Sleep(1 * time.Second)
-
-		// 点击确定按钮
-		if err := ctx.Page.Locator("button:has-text('定时发布')").Click(); err != nil {
-			utils.Warn(fmt.Sprintf("[-] 点击定时发布确认按钮失败: %v", err))
-		}
-
-		return uploader.StepResult{Step: uploader.StepSetSchedule, Success: true}
-	}
-}
-
-// StepCheckSecurityVerification 检测百度安全验证
-func (u *Uploader) StepCheckSecurityVerification() uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		time.Sleep(2 * time.Second)
-
-		// 检测是否出现百度安全验证弹窗
-		verifyLocator := ctx.Page.Locator("div.passMod_dialog-container:has-text('百度安全验证')")
-		count, err := verifyLocator.Count()
-		if err != nil {
-			utils.Warn(fmt.Sprintf("[-] 检测安全验证时出错: %v", err))
-			return uploader.StepResult{Step: uploader.StepPublish, Success: true}
-		}
-
-		if count > 0 {
-			// 检查是否可见
-			visible, _ := verifyLocator.IsVisible()
-			if visible {
-				utils.Error("[-] 出现百度安全验证，需要人工处理")
-				return uploader.StepResult{Step: uploader.StepPublish, Success: false, Error: fmt.Errorf("百度安全验证出现，需要人工处理")}
-			}
-		}
-
-		return uploader.StepResult{Step: uploader.StepPublish, Success: true}
-	}
-}
-
-// StepClickPublishBaijiahao 百家号发布步骤（参照Python版本）
-func (u *Uploader) StepClickPublishBaijiahao() uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		ctx.ReportProgress(uploader.StepPublish, 85, "正在发布...")
-
-		// 点击发布按钮
-		publishBtn := ctx.Page.Locator("button:has-text('发布')")
-		if err := publishBtn.Click(); err != nil {
-			return uploader.StepResult{Step: uploader.StepPublish, Success: false, Error: fmt.Errorf("click publish failed: %w", err)}
-		}
-
-		ctx.ReportProgress(uploader.StepPublish, 88, "等待发布结果...")
-
-		// 等待发布成功（参照Python版本：等待跳转到clue页面）
-		timeout := time.After(30 * time.Second)
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-timeout:
-				ctx.TakeScreenshot("publish_timeout")
-				return uploader.StepResult{Step: uploader.StepPublish, Success: false, Error: fmt.Errorf("publish timeout")}
-			case <-ticker.C:
-				// 检查是否跳转到线索页面（Python版本逻辑）
-				url := ctx.Page.URL()
-				if strings.Contains(url, "baijiahao.baidu.com/builder/rc/clue") {
-					// 保存cookie（参照Python版本）
-					if ctx.BrowserCtx != nil {
-						if err := ctx.BrowserCtx.SaveCookies(); err != nil {
-							utils.Warn(fmt.Sprintf("[-] 保存cookie失败: %v", err))
-						} else {
-							utils.Info("[-] Cookie已保存")
-						}
-					}
-					ctx.ReportProgress(uploader.StepPublish, 95, "发布成功")
-					ctx.TakeScreenshot("publish_success")
-					return uploader.StepResult{Step: uploader.StepPublish, Success: true}
-				}
-
-				// 检测安全验证
-				verifyCount, _ := ctx.Page.Locator("div.passMod_dialog-container:has-text('百度安全验证')").Count()
-				if verifyCount > 0 {
-					visible, _ := ctx.Page.Locator("div.passMod_dialog-container:has-text('百度安全验证')").IsVisible()
-					if visible {
-						return uploader.StepResult{Step: uploader.StepPublish, Success: false, Error: fmt.Errorf("百度安全验证出现，需要人工处理")}
-					}
-				}
-
-				// 截图记录发布状态
-				ctx.TakeScreenshot("publishing")
-			}
-		}
-	}
-}
-
-// Login 登录
-// 参照Python版本：使用page.pause()等待用户完成登录，然后保存cookie
-func (u *Uploader) Login() error {
-	ctx := context.Background()
-
-	// 创建新的浏览器上下文（不使用现有cookie）
-	browserCtx, err := browserPool.GetContext(ctx, "", u.GetContextOptions())
+	browserCtx, err := browserPool.GetContext(ctx, u.cookiePath, nil)
 	if err != nil {
-		return fmt.Errorf("get browser context failed: %w", err)
+		return fmt.Errorf("获取浏览器失败: %w", err)
 	}
-	// 注意：这里不defer Release，因为登录成功后需要保持上下文
+	defer browserCtx.Release()
 
 	page, err := browserCtx.GetPage()
 	if err != nil {
-		browserCtx.Release()
-		return fmt.Errorf("get page failed: %w", err)
+		return fmt.Errorf("获取页面失败: %w", err)
 	}
 
-	// 参照Python版本：直接打开登录页面
-	utils.Info("[-] 正在打开百家号登录页面...")
-	if _, err := page.Goto("https://baijiahao.baidu.com/builder/theme/bjh/login", playwright.PageGotoOptions{
-		WaitUntil: playwright.WaitUntilStateNetworkidle,
+	// 导航到发布页面
+	utils.InfoWithPlatform(u.platform, "正在打开发布页面...")
+	if _, err := page.Goto("https://baijiahao.baidu.com/builder/rc/edit?type=videoV2", playwright.PageGotoOptions{
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
 	}); err != nil {
-		browserCtx.Release()
-		return fmt.Errorf("goto login page failed: %w", err)
+		return fmt.Errorf("打开发布页面失败: %w", err)
 	}
 
-	utils.Info("[-] 请在浏览器窗口中完成登录")
-	utils.Info("[-] 提示：如需要手机验证码，请保持手机畅通")
-	utils.Info("[-] 登录完成后，请在开发者工具中点击继续（Resume）按钮")
+	// 等待页面加载
+	utils.InfoWithPlatform(u.platform, "等待页面加载...")
+	if err := page.Locator("div#formMain:visible").WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(10000),
+	}); err != nil {
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("等待页面加载超时: %v", err))
+	}
+	time.Sleep(3 * time.Second)
 
-	// 参照Python版本：使用page.pause()暂停，等待用户完成登录
-	// 这样用户可以在浏览器中完成所有登录步骤（包括验证码、短信验证等）
-	if err := page.Pause(); err != nil {
-		utils.Warn(fmt.Sprintf("[-] page.pause()返回: %v", err))
+	// 上传视频
+	utils.InfoWithPlatform(u.platform, "正在上传视频...")
+	inputLocator := page.Locator("div[class^='video-main-container'] input[type='file']").First()
+	if count, _ := inputLocator.Count(); count == 0 {
+		inputLocator = page.Locator("input[type='file']").First()
 	}
 
-	// 用户点击继续后，检查是否登录成功
-	utils.Info("[-] 正在检查登录状态...")
+	if err := inputLocator.SetInputFiles(task.VideoPath); err != nil {
+		return fmt.Errorf("上传视频失败: %w", err)
+	}
+
+	// 等待上传完成
+	utils.InfoWithPlatform(u.platform, "等待视频上传完成...")
+	if err := u.waitForUploadComplete(ctx, page, browserCtx); err != nil {
+		return fmt.Errorf("等待上传完成失败: %w", err)
+	}
+
 	time.Sleep(2 * time.Second)
 
-	// 检查当前URL
-	currentURL := page.URL()
-	utils.Info(fmt.Sprintf("[-] 当前URL: %s", currentURL))
+	// 填写标题
+	if err := u.fillTitle(page, task.Title); err != nil {
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("填写标题失败: %v", err))
+	}
 
-	// 检查是否已进入创作者中心
-	if strings.Contains(currentURL, "baijiahao.baidu.com/builder") {
-		// 保存cookie
-		if err := browserCtx.SaveCookiesTo(u.GetCookiePath()); err != nil {
-			utils.Warn(fmt.Sprintf("[-] 保存Cookie失败: %v", err))
-			browserCtx.Release()
-			return fmt.Errorf("save cookies failed: %w", err)
+	// 填写描述
+	if task.Description != "" {
+		if err := u.fillDescription(page, task.Description); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("填写描述失败: %v", err))
 		}
-		utils.Info("[-] Cookie已保存")
-		browserCtx.Release()
+	}
+
+	// 添加标签
+	if len(task.Tags) > 0 {
+		if err := u.addTags(page, task.Tags); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("添加标签失败: %v", err))
+		}
+	}
+
+	// 等待封面生成
+	utils.InfoWithPlatform(u.platform, "等待封面生成...")
+	if err := u.waitForCoverGenerated(page); err != nil {
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("等待封面生成失败: %v", err))
+	}
+
+	// 设置自定义封面
+	if task.Thumbnail != "" {
+		if err := u.setCustomCover(page, task.Thumbnail); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("设置自定义封面失败: %v", err))
+		}
+	}
+
+	// 设置定时发布
+	if task.ScheduleTime != nil && *task.ScheduleTime != "" {
+		if err := u.setScheduleTime(page, *task.ScheduleTime); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("设置定时发布失败: %v", err))
+		}
+	}
+
+	// 点击发布
+	utils.InfoWithPlatform(u.platform, "准备发布...")
+	if err := u.publish(page, browserCtx); err != nil {
+		return fmt.Errorf("发布失败: %w", err)
+	}
+
+	utils.SuccessWithPlatform(u.platform, "发布成功")
+	return nil
+}
+
+// waitForUploadComplete 等待视频上传完成
+func (u *Uploader) waitForUploadComplete(ctx context.Context, page playwright.Page, browserCtx *browser.Context) error {
+	uploadTimeout := 10 * time.Minute
+	uploadCheckInterval := 2 * time.Second
+	uploadStartTime := time.Now()
+
+	for time.Since(uploadStartTime) < uploadTimeout {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("上传已取消")
+		default:
+		}
+
+		if browserCtx.IsPageClosed() {
+			return fmt.Errorf("浏览器已关闭")
+		}
+
+		// 检测上传成功标志
+		// 方式1：检查视频预览区域出现
+		videoPreview := page.Locator("div.video-preview, div[class^='videoPreview']").First()
+		if count, _ := videoPreview.Count(); count > 0 {
+			if visible, _ := videoPreview.IsVisible(); visible {
+				utils.InfoWithPlatform(u.platform, "视频上传完成（检测到预览区域）")
+				return nil
+			}
+		}
+
+		// 方式2：检查上传进度条消失
+		progressBar := page.Locator("div[class^='upload-progress'], div.progress-bar").First()
+		if count, _ := progressBar.Count(); count == 0 {
+			// 进度条消失，检查是否有视频信息
+			videoInfo := page.Locator("div.video-info, div[class^='videoInfo']").First()
+			if count, _ := videoInfo.Count(); count > 0 {
+				utils.InfoWithPlatform(u.platform, "视频上传完成（进度条消失且检测到视频信息）")
+				return nil
+			}
+		}
+
+		// 方式3：检查"上传成功"文本
+		successText := page.Locator("text=/上传成功|上传完成|视频已上传/").First()
+		if count, _ := successText.Count(); count > 0 {
+			if visible, _ := successText.IsVisible(); visible {
+				utils.InfoWithPlatform(u.platform, "视频上传完成（检测到成功文本）")
+				return nil
+			}
+		}
+
+		// 检测上传失败
+		errorText := page.Locator("text=/上传失败|上传出错|Upload failed/").First()
+		if count, _ := errorText.Count(); count > 0 {
+			return fmt.Errorf("视频上传失败")
+		}
+
+		time.Sleep(uploadCheckInterval)
+	}
+
+	return fmt.Errorf("上传超时")
+}
+
+// fillTitle 填写标题
+func (u *Uploader) fillTitle(page playwright.Page, title string) error {
+	if title == "" {
 		return nil
 	}
 
-	// 如果没有进入创作者中心，尝试保存cookie anyway
-	utils.Warn("[-] 未检测到创作者中心页面，但仍尝试保存Cookie")
-	if err := browserCtx.SaveCookiesTo(u.GetCookiePath()); err != nil {
-		utils.Warn(fmt.Sprintf("[-] 保存Cookie失败: %v", err))
+	utils.InfoWithPlatform(u.platform, "填写标题...")
+
+	// 百家号标题少于8字符时自动补全
+	if len(title) < 8 {
+		title = title + " 你不知道的"
+		utils.InfoWithPlatform(u.platform, fmt.Sprintf("标题少于8字符，自动补全为: %s", title))
 	}
 
-	browserCtx.Release()
-	return fmt.Errorf("login may not be complete, current url: %s", currentURL)
+	// 限制30字符
+	if len(title) > 30 {
+		runes := []rune(title)
+		if len(runes) > 30 {
+			title = string(runes[:30])
+		}
+	}
+
+	titleInput := page.GetByPlaceholder("添加标题获得更多推荐")
+	if err := titleInput.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(5000),
+	}); err != nil {
+		// 兜底：尝试其他选择器
+		titleInput = page.Locator("input[placeholder*='标题']").First()
+	}
+
+	if count, _ := titleInput.Count(); count == 0 {
+		return fmt.Errorf("未找到标题输入框")
+	}
+
+	if err := titleInput.Fill(title); err != nil {
+		return fmt.Errorf("填写标题失败: %w", err)
+	}
+
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("标题已填写: %s", title))
+	time.Sleep(500 * time.Millisecond)
+	return nil
+}
+
+// fillDescription 填写描述
+func (u *Uploader) fillDescription(page playwright.Page, description string) error {
+	utils.InfoWithPlatform(u.platform, "填写描述...")
+
+	// 尝试多种选择器定位描述输入框
+	descInput := page.Locator("textarea[placeholder*='简介'], textarea[placeholder*='描述'], div.ql-editor[data-placeholder*='简介']").First()
+	if err := descInput.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+	}); err != nil {
+		// 兜底：尝试富文本编辑器
+		descInput = page.Locator("div.ql-editor").First()
+	}
+
+	if count, _ := descInput.Count(); count == 0 {
+		return fmt.Errorf("未找到描述输入框")
+	}
+
+	if err := descInput.Fill(description); err != nil {
+		return fmt.Errorf("填写描述失败: %w", err)
+	}
+
+	utils.InfoWithPlatform(u.platform, "描述已填写")
+	time.Sleep(500 * time.Millisecond)
+	return nil
+}
+
+// addTags 添加标签
+func (u *Uploader) addTags(page playwright.Page, tags []string) error {
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("添加%d个标签...", len(tags)))
+
+	// 定位标签输入框
+	tagInput := page.Locator("input[placeholder*='标签'], input[placeholder*='话题']").First()
+	if err := tagInput.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+	}); err != nil {
+		return fmt.Errorf("未找到标签输入框: %w", err)
+	}
+
+	for i, tag := range tags {
+		// 清理标签中的特殊字符
+		cleanTag := strings.TrimSpace(tag)
+		cleanTag = strings.ReplaceAll(cleanTag, "#", "")
+		cleanTag = strings.ReplaceAll(cleanTag, " ", "")
+
+		if cleanTag == "" {
+			continue
+		}
+
+		if err := tagInput.Fill(cleanTag); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("输入标签[%d]失败: %v", i, err))
+			continue
+		}
+		time.Sleep(300 * time.Millisecond)
+
+		// 按Enter确认标签
+		if err := tagInput.Press("Enter"); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("确认标签[%d]失败: %v", i, err))
+			continue
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	utils.InfoWithPlatform(u.platform, "标签添加完成")
+	return nil
+}
+
+// waitForCoverGenerated 等待封面自动生成
+func (u *Uploader) waitForCoverGenerated(page playwright.Page) error {
+	coverTimeout := 30 * time.Second
+	coverCheckInterval := 1 * time.Second
+	coverStartTime := time.Now()
+
+	for time.Since(coverStartTime) < coverTimeout {
+		// 检查封面图片是否加载完成
+		coverImg := page.Locator("div.cheetah-spin-container img, div[class^='cover'] img, .cover-preview img").First()
+		if count, _ := coverImg.Count(); count > 0 {
+			if visible, _ := coverImg.IsVisible(); visible {
+				utils.InfoWithPlatform(u.platform, "封面已生成")
+				return nil
+			}
+		}
+
+		// 检查封面区域是否有内容
+		coverArea := page.Locator("div[class^='cover'], div.cover-area").First()
+		if count, _ := coverArea.Count(); count > 0 {
+			// 检查是否有背景图或子元素
+			hasContent, _ := coverArea.Evaluate(`el => {
+				return el.querySelector('img') !== null || 
+				       el.style.backgroundImage !== '' && el.style.backgroundImage !== 'none'
+			}`)
+			if hasContent.(bool) {
+				utils.InfoWithPlatform(u.platform, "封面已生成")
+				return nil
+			}
+		}
+
+		time.Sleep(coverCheckInterval)
+	}
+
+	return fmt.Errorf("等待封面生成超时")
+}
+
+// setCustomCover 设置自定义封面
+func (u *Uploader) setCustomCover(page playwright.Page, coverPath string) error {
+	if _, err := os.Stat(coverPath); err != nil {
+		return fmt.Errorf("封面文件不存在: %w", err)
+	}
+
+	utils.InfoWithPlatform(u.platform, "设置自定义封面...")
+
+	// 点击封面区域打开选择弹窗
+	coverArea := page.Locator("div[class^='cover'], div.cover-area, div.cheetah-spin-container").First()
+	if err := coverArea.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(5000),
+	}); err != nil {
+		return fmt.Errorf("未找到封面区域: %w", err)
+	}
+
+	if err := coverArea.Click(); err != nil {
+		return fmt.Errorf("点击封面区域失败: %w", err)
+	}
+	time.Sleep(2 * time.Second)
+
+	// 查找文件输入框
+	coverInput := page.Locator("input[type='file'][accept*='image']").First()
+	if err := coverInput.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(5000),
+	}); err != nil {
+		return fmt.Errorf("未找到封面文件输入框: %w", err)
+	}
+
+	if err := coverInput.SetInputFiles(coverPath); err != nil {
+		return fmt.Errorf("上传封面失败: %w", err)
+	}
+
+	utils.InfoWithPlatform(u.platform, "封面上传中...")
+	time.Sleep(3 * time.Second)
+
+	// 点击确认或完成按钮
+	confirmBtn := page.Locator("button:has-text('确认'), button:has-text('完成'), button:has-text('确定')").First()
+	if count, _ := confirmBtn.Count(); count > 0 {
+		if err := confirmBtn.Click(); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("点击确认按钮失败: %v", err))
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	utils.InfoWithPlatform(u.platform, "封面设置完成")
+	return nil
+}
+
+// setScheduleTime 设置定时发布
+func (u *Uploader) setScheduleTime(page playwright.Page, scheduleTime string) error {
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("设置定时发布时间: %s", scheduleTime))
+
+	// 解析时间
+	targetTime, err := time.Parse("2006-01-02 15:04", scheduleTime)
+	if err != nil {
+		return fmt.Errorf("解析时间失败: %w", err)
+	}
+
+	// 百家号定时发布范围：未来2-24小时（Python版使用随机时间）
+	now := time.Now()
+	minTime := now.Add(2 * time.Hour)
+	maxTime := now.Add(24 * time.Hour)
+
+	if targetTime.Before(minTime) {
+		// 如果指定时间不符合要求，使用随机时间
+		randomMinutes := time.Duration(rand.Intn(22*60)+120) * time.Minute
+		targetTime = now.Add(randomMinutes)
+		utils.InfoWithPlatform(u.platform, fmt.Sprintf("指定时间不符合要求，使用随机时间: %s", targetTime.Format("2006-01-02 15:04")))
+	}
+	if targetTime.After(maxTime) {
+		targetTime = maxTime
+	}
+
+	// 点击定时发布选项
+	scheduleLabel := page.Locator("label:has-text('定时发布'), text='定时发布'").First()
+	if err := scheduleLabel.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+	}); err != nil {
+		return fmt.Errorf("未找到定时发布选项: %w", err)
+	}
+
+	if err := scheduleLabel.Click(); err != nil {
+		return fmt.Errorf("点击定时发布失败: %w", err)
+	}
+	time.Sleep(1 * time.Second)
+
+	// 选择时间
+	timeInput := page.Locator("input[placeholder*='时间'], input[placeholder*='日期']").First()
+	if err := timeInput.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+	}); err != nil {
+		return fmt.Errorf("未找到时间输入框: %w", err)
+	}
+
+	if err := timeInput.Click(); err != nil {
+		return fmt.Errorf("点击时间输入框失败: %w", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// 输入时间
+	timeStr := targetTime.Format("2006-01-02 15:04")
+	if err := timeInput.Fill(timeStr); err != nil {
+		return fmt.Errorf("输入时间失败: %w", err)
+	}
+
+	// 按Enter确认
+	if err := timeInput.Press("Enter"); err != nil {
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("按Enter确认失败: %v", err))
+	}
+
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("定时发布时间设置完成: %s", timeStr))
+	time.Sleep(1 * time.Second)
+	return nil
+}
+
+// publish 点击发布并检测结果
+func (u *Uploader) publish(page playwright.Page, browserCtx *browser.Context) error {
+	// 定位发布按钮
+	publishBtn := page.Locator("button:has-text('发布'), button:has-text('立即发布')").First()
+	if err := publishBtn.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(5000),
+	}); err != nil {
+		return fmt.Errorf("未找到发布按钮: %w", err)
+	}
+
+	// 滚动到按钮可见
+	if err := publishBtn.ScrollIntoViewIfNeeded(); err != nil {
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("滚动到发布按钮失败: %v", err))
+	}
+
+	urlBeforePublish := page.URL()
+	maxAttempts := 3
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if browserCtx.IsPageClosed() {
+			return fmt.Errorf("浏览器已关闭")
+		}
+
+		utils.InfoWithPlatform(u.platform, fmt.Sprintf("第%d次尝试发布...", attempt+1))
+
+		// 点击发布按钮
+		if err := publishBtn.Click(playwright.LocatorClickOptions{
+			Force: playwright.Bool(true),
+		}); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("点击发布按钮失败: %v", err))
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		utils.InfoWithPlatform(u.platform, "已点击发布按钮")
+		time.Sleep(3 * time.Second)
+
+		// 处理确认弹窗
+		confirmDialog := page.Locator("button:has-text('确定'), button:has-text('确认')").First()
+		if count, _ := confirmDialog.Count(); count > 0 {
+			if visible, _ := confirmDialog.IsVisible(); visible {
+				utils.InfoWithPlatform(u.platform, "处理确认弹窗...")
+				confirmDialog.Click()
+				time.Sleep(2 * time.Second)
+			}
+		}
+
+		// 检测发布结果
+		if err := u.checkPublishResult(page, browserCtx, urlBeforePublish); err == nil {
+			return nil
+		} else {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("发布检测未通过: %v", err))
+		}
+
+		if attempt < maxAttempts-1 {
+			time.Sleep(3 * time.Second)
+		}
+	}
+
+	return fmt.Errorf("发布失败，已重试%d次", maxAttempts)
+}
+
+// checkPublishResult 检测发布结果
+func (u *Uploader) checkPublishResult(page playwright.Page, browserCtx *browser.Context, urlBefore string) error {
+	checkTimeout := 60 * time.Second
+	checkInterval := 2 * time.Second
+	checkStart := time.Now()
+
+	for time.Since(checkStart) < checkTimeout {
+		if browserCtx.IsPageClosed() {
+			return fmt.Errorf("浏览器已关闭")
+		}
+
+		currentURL := page.URL()
+
+		// 成功标志1：URL跳转到管理页
+		if strings.Contains(currentURL, "baijiahao.baidu.com/builder/rc/clue") ||
+			strings.Contains(currentURL, "baijiahao.baidu.com/builder/rc/manage") {
+			utils.InfoWithPlatform(u.platform, "发布成功，页面已跳转到管理页")
+			return nil
+		}
+
+		// 成功标志2：URL变化且不再包含edit
+		if currentURL != urlBefore && !strings.Contains(currentURL, "edit") {
+			utils.InfoWithPlatform(u.platform, "发布成功，URL已变化")
+			return nil
+		}
+
+		// 成功标志3：成功提示文本
+		successIndicators := []string{"发布成功", "提交成功", "审核中", "稿件已提交"}
+		for _, indicator := range successIndicators {
+			successText := page.Locator(fmt.Sprintf("text=%s", indicator)).First()
+			if count, _ := successText.Count(); count > 0 {
+				if visible, _ := successText.IsVisible(); visible {
+					text, _ := successText.TextContent()
+					utils.InfoWithPlatform(u.platform, fmt.Sprintf("检测到成功提示: %s", text))
+					return nil
+				}
+			}
+		}
+
+		// 失败标志
+		errorIndicators := []string{"发布失败", "提交失败", "错误", "请完善"}
+		for _, indicator := range errorIndicators {
+			errorText := page.Locator(fmt.Sprintf("text=%s", indicator)).First()
+			if count, _ := errorText.Count(); count > 0 {
+				if visible, _ := errorText.IsVisible(); visible {
+					text, _ := errorText.TextContent()
+					return fmt.Errorf("发布出错: %s", text)
+				}
+			}
+		}
+
+		time.Sleep(checkInterval)
+	}
+
+	return fmt.Errorf("发布检测超时")
+}
+
+// Login 登录
+func (u *Uploader) Login() error {
+	debugLog("Login开始 - cookiePath: '%s'", u.cookiePath)
+	if u.cookiePath == "" {
+		return fmt.Errorf("cookie路径为空")
+	}
+
+	ctx := context.Background()
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("Cookie保存路径: %s", u.cookiePath))
+
+	browserCtx, err := browserPool.GetContext(ctx, "", nil)
+	if err != nil {
+		return fmt.Errorf("获取浏览器失败: %w", err)
+	}
+	defer browserCtx.Release()
+
+	page, err := browserCtx.GetPage()
+	if err != nil {
+		return fmt.Errorf("获取页面失败: %w", err)
+	}
+
+	utils.InfoWithPlatform(u.platform, "正在打开登录页面...")
+	if _, err := page.Goto("https://baijiahao.baidu.com/builder/theme/bjh/login", playwright.PageGotoOptions{
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
+	}); err != nil {
+		return fmt.Errorf("打开登录页面失败: %w", err)
+	}
+
+	time.Sleep(3 * time.Second)
+
+	utils.InfoWithPlatform(u.platform, "请在浏览器窗口中完成登录...")
+
+	// 使用Cookie检测机制等待登录成功
+	cookieConfig, ok := browser.GetCookieConfig("baijiahao")
+	if !ok {
+		return fmt.Errorf("获取百家号Cookie配置失败")
+	}
+
+	if err := browserCtx.WaitForLoginCookies(cookieConfig); err != nil {
+		return fmt.Errorf("等待登录Cookie失败: %w", err)
+	}
+
+	utils.SuccessWithPlatform(u.platform, "登录成功，检测到PTOKEN和BAIDUID Cookie")
+	if err := browserCtx.SaveCookiesTo(u.cookiePath); err != nil {
+		return fmt.Errorf("保存Cookie失败: %w", err)
+	}
+	utils.InfoWithPlatform(u.platform, "Cookie已保存")
+	return nil
 }

@@ -3,752 +3,755 @@ package douyin
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
+	"Fuploader/internal/config"
 	"Fuploader/internal/platform/browser"
-	"Fuploader/internal/platform/uploader"
 	"Fuploader/internal/types"
 	"Fuploader/internal/utils"
 
 	"github.com/playwright-community/playwright-go"
 )
 
+// debugLog 调试日志输出，仅在调试模式下显示
+func debugLog(format string, args ...interface{}) {
+	if config.Config != nil && config.Config.DebugMode {
+		utils.InfoWithPlatform("douyin", fmt.Sprintf("[调试] "+format, args...))
+	}
+}
+
 // browserPool 全局浏览器池实例
 var browserPool *browser.Pool
 
-// initBrowserPool 初始化浏览器池
-func initBrowserPool() {
-	if browserPool == nil {
-		browserPool = browser.NewPool(2, 5) // 最多2个浏览器，每个5个上下文
-	}
+func init() {
+	browserPool = browser.NewPool(2, 5)
 }
 
 // Uploader 抖音上传器
 type Uploader struct {
-	*uploader.Base
+	cookiePath string
+	platform   string
 }
 
 // NewUploader 创建上传器
 func NewUploader(cookiePath string) *Uploader {
-	initBrowserPool()
-	return &Uploader{
-		Base: uploader.NewBase("douyin", cookiePath, browserPool),
+	u := &Uploader{
+		cookiePath: cookiePath,
+		platform:   "douyin",
 	}
+	debugLog("创建上传器 - 地址: %p, cookiePath: '%s'", u, cookiePath)
+	if cookiePath == "" {
+		utils.Warn("[Douyin] NewUploader 收到空的cookiePath!")
+	}
+	return u
 }
 
 // Platform 返回平台名称
 func (u *Uploader) Platform() string {
-	return "douyin"
+	return u.platform
 }
 
-// ValidateCookie 验证 Cookie 是否有效
+// ValidateCookie 验证Cookie是否有效
 func (u *Uploader) ValidateCookie(ctx context.Context) (bool, error) {
-	// 从浏览器池获取上下文
-	browserCtx, err := browserPool.GetContext(ctx, u.GetCookiePath(), u.GetContextOptions())
+	utils.InfoWithPlatform(u.platform, "验证Cookie")
+
+	if _, err := os.Stat(u.cookiePath); os.IsNotExist(err) {
+		utils.WarnWithPlatform(u.platform, "Cookie文件不存在")
+		return false, nil
+	}
+
+	browserCtx, err := browserPool.GetContext(ctx, u.cookiePath, nil)
 	if err != nil {
-		return false, fmt.Errorf("get browser context failed: %w", err)
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("获取浏览器失败: %v", err))
+		return false, nil
 	}
 	defer browserCtx.Release()
 
 	page, err := browserCtx.GetPage()
 	if err != nil {
-		return false, fmt.Errorf("get page failed: %w", err)
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("获取页面失败: %v", err))
+		return false, nil
 	}
 
-	// 访问抖音创作者中心
-	utils.Info("[-] 正在验证抖音登录状态...")
-	if _, err := page.Goto("https://creator.douyin.com/"); err != nil {
-		return false, fmt.Errorf("goto creator page failed: %w", err)
+	if _, err := page.Goto("https://creator.douyin.com/", playwright.PageGotoOptions{
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
+	}); err != nil {
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("打开页面失败: %v", err))
+		return false, nil
 	}
 
 	time.Sleep(3 * time.Second)
 
-	// 检查当前URL
-	currentURL := page.URL()
-	utils.Info(fmt.Sprintf("[-] 当前URL: %s", currentURL))
-
-	// 如果被重定向到登录页，说明Cookie无效
-	if currentURL == "https://creator.douyin.com/login" ||
-		currentURL == "https://www.douyin.com/login" {
-		utils.Info("[-] 被重定向到登录页，Cookie 无效")
-		return false, nil
+	// 使用Cookie检测机制验证登录状态
+	cookieConfig, ok := browser.GetCookieConfig("douyin")
+	if !ok {
+		return false, fmt.Errorf("获取抖音Cookie配置失败")
 	}
 
-	// 检查是否有登录页特征
-	phoneLoginCount, _ := page.GetByText("手机号登录").Count()
-	qrLoginCount, _ := page.GetByText("扫码登录").Count()
-	if phoneLoginCount > 0 || qrLoginCount > 0 {
-		utils.Info("[-] 检测到登录页特征，Cookie 无效")
-		return false, nil
+	isValid, err := browserCtx.ValidateLoginCookies(cookieConfig)
+	if err != nil {
+		return false, fmt.Errorf("验证Cookie失败: %w", err)
 	}
 
-	// 检查是否有创作者中心特征元素（根据实际页面）
-	// 左侧菜单
-	homeMenu, _ := page.GetByText("首页").Count()
-	contentManage, _ := page.GetByText("内容管理").Count()
-	// 主要内容区
-	publishVideo, _ := page.GetByText("发布视频").Count()
-
-	if homeMenu > 0 || contentManage > 0 || publishVideo > 0 {
-		utils.Info("[-] 检测到创作者中心特征元素，Cookie 有效")
-		return true, nil
+	if isValid {
+		utils.InfoWithPlatform(u.platform, "检测到sessionid Cookie，验证通过")
+	} else {
+		utils.InfoWithPlatform(u.platform, "未检测到sessionid Cookie，验证失败")
 	}
 
-	utils.Info("[-] 未检测到登录特征，Cookie 无效")
-	return false, nil
+	return isValid, nil
 }
 
 // Upload 上传视频
 func (u *Uploader) Upload(ctx context.Context, task *types.VideoTask) error {
-	steps := []uploader.StepFunc{
-		// 1. 导航到上传页面
-		u.StepNavigate("https://creator.douyin.com/creator-micro/content/upload"),
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("开始上传: %s", task.VideoPath))
 
-		// 2. 上传视频
-		u.StepUploadVideo(
-			"div[class^='container'] input",
-			[]string{"[class^=\"long-card\"] div:has-text(\"重新上传\")"},
-			[]string{"text=上传失败", ".upload-error"},
-		),
-
-		// 3. 填写标题
-		u.StepFillTitleDouyin(task.Title),
-
-		// 4. 填写简介
-		u.StepFillDescription(task.Description),
-
-		// 5. 添加标签
-		u.StepAddTagsDouyin(task.Tags),
-
-		// 6. 设置位置（改进版）
-		u.StepSetLocationDouyin(task.Location),
-
-		// 7. 设置第三方同步（头条/西瓜）
-		u.StepSyncThirdParty(task.SyncToutiao, task.SyncXigua),
-
-		// 8. 设置商品链接（如果有）
-		u.StepSetProductLink(task.ProductLink, task.ProductTitle),
-
-		// 9. 设置封面（改进版 - 优先使用自定义封面）
-		u.StepSetCoverDouyin(task.Thumbnail),
-
-		// 10. 处理自动封面选择（如果未设置自定义封面）
-		u.StepHandleAutoCover(),
-
-		// 11. 点击发布（带重试机制）
-		u.StepClickPublishWithRetry(),
+	if _, err := os.Stat(task.VideoPath); err != nil {
+		return fmt.Errorf("视频文件不存在: %w", err)
 	}
 
-	return u.Execute(ctx, task, steps)
-}
-
-// StepFillTitleDouyin 抖音填写标题步骤（参考Python项目实现）
-func (u *Uploader) StepFillTitleDouyin(title string) uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		if title == "" {
-			return uploader.StepResult{Step: uploader.StepFillTitle, Success: true}
-		}
-
-		// 限制标题长度（抖音限制30个字符）
-		if len(title) > 30 {
-			title = title[:30]
-		}
-
-		ctx.ReportProgress(uploader.StepFillTitle, 25, "正在填写标题...")
-
-		// 方案1：使用相对定位（作品标题父级右侧第一个元素的input）
-		titleContainer := ctx.Page.GetByText("作品标题").Locator("..").Locator("xpath=following-sibling::div[1]").Locator("input")
-		count, _ := titleContainer.Count()
-
-		if count > 0 {
-			if err := titleContainer.Fill(title); err != nil {
-				utils.Warn(fmt.Sprintf("[-] 使用相对定位填写标题失败: %v", err))
-			} else {
-				ctx.ReportProgress(uploader.StepFillTitle, 30, "标题填写完成")
-				return uploader.StepResult{Step: uploader.StepFillTitle, Success: true}
-			}
-		}
-
-		// 方案2：使用 .notranslate 类（参考Python项目）
-		utils.Info("[-] 尝试使用备选方案填写标题...")
-		titleInput := ctx.Page.Locator(".notranslate").First()
-		if count, _ := titleInput.Count(); count > 0 {
-			// 先清空输入框
-			if err := titleInput.Click(); err != nil {
-				return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: fmt.Errorf("click title input failed: %w", err)}
-			}
-			if err := ctx.Page.Keyboard().Press("Backspace"); err != nil {
-				return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: fmt.Errorf("clear title failed: %w", err)}
-			}
-			if err := ctx.Page.Keyboard().Press("Control+KeyA"); err != nil {
-				return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: fmt.Errorf("select all title failed: %w", err)}
-			}
-			if err := ctx.Page.Keyboard().Press("Delete"); err != nil {
-				return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: fmt.Errorf("delete title failed: %w", err)}
-			}
-			// 输入标题
-			if err := ctx.Page.Keyboard().Type(title); err != nil {
-				return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: fmt.Errorf("type title failed: %w", err)}
-			}
-			if err := ctx.Page.Keyboard().Press("Enter"); err != nil {
-				return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: fmt.Errorf("press enter failed: %w", err)}
-			}
-
-			ctx.ReportProgress(uploader.StepFillTitle, 30, "标题填写完成")
-			return uploader.StepResult{Step: uploader.StepFillTitle, Success: true}
-		}
-
-		return uploader.StepResult{Step: uploader.StepFillTitle, Success: false, Error: fmt.Errorf("title input not found")}
-	}
-}
-
-// StepFillDescription 填写简介步骤（参考Python项目，抖音描述和标题共用.notranslate）
-func (u *Uploader) StepFillDescription(description string) uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		if description == "" {
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		ctx.ReportProgress(uploader.StepFillContent, 31, "正在填写描述...")
-
-		// 方案1：使用相对定位
-		descContainer := ctx.Page.GetByText("作品描述").Locator("..").Locator("xpath=following-sibling::div[1]").Locator("textarea, .notranslate").First()
-		count, _ := descContainer.Count()
-
-		if count > 0 {
-			if err := descContainer.Fill(description); err != nil {
-				utils.Warn(fmt.Sprintf("[-] 使用相对定位填写描述失败: %v", err))
-			} else {
-				ctx.ReportProgress(uploader.StepFillContent, 35, "描述填写完成")
-				return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-			}
-		}
-
-		// 方案2：使用 .notranslate 类（参考Python项目，抖音描述和标题共用.notranslate）
-		utils.Info("[-] 尝试使用备选方案填写描述...")
-		// 获取第二个.notranslate（第一个是标题）
-		descInput := ctx.Page.Locator(".notranslate").Nth(1)
-		if count, _ := descInput.Count(); count > 0 {
-			// 先清空输入框
-			if err := descInput.Click(); err != nil {
-				return uploader.StepResult{Step: uploader.StepFillContent, Success: false, Error: fmt.Errorf("click desc input failed: %w", err)}
-			}
-			if err := ctx.Page.Keyboard().Press("Control+KeyA"); err != nil {
-				return uploader.StepResult{Step: uploader.StepFillContent, Success: false, Error: fmt.Errorf("select all desc failed: %w", err)}
-			}
-			if err := ctx.Page.Keyboard().Press("Delete"); err != nil {
-				return uploader.StepResult{Step: uploader.StepFillContent, Success: false, Error: fmt.Errorf("delete desc failed: %w", err)}
-			}
-			// 输入描述
-			if err := ctx.Page.Keyboard().Type(description); err != nil {
-				return uploader.StepResult{Step: uploader.StepFillContent, Success: false, Error: fmt.Errorf("type desc failed: %w", err)}
-			}
-
-			ctx.ReportProgress(uploader.StepFillContent, 35, "描述填写完成")
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		// 如果都失败，记录警告但不阻塞流程（描述不是必须的）
-		utils.Warn("[-] 描述填写失败，继续执行")
-		return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-	}
-}
-
-// StepAddTagsDouyin 抖音添加标签步骤（参考Python项目）
-func (u *Uploader) StepAddTagsDouyin(tags []string) uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		if len(tags) == 0 {
-			return uploader.StepResult{Step: uploader.StepAddTags, Success: true}
-		}
-
-		ctx.ReportProgress(uploader.StepAddTags, 36, "正在添加标签...")
-
-		// 方案1：使用 .zone-container（参考Python项目）
-		cssSelector := ".zone-container"
-		tagContainer := ctx.Page.Locator(cssSelector).First()
-		count, _ := tagContainer.Count()
-
-		if count > 0 {
-			utils.Info(fmt.Sprintf("[-] 正在添加 %d 个标签...", len(tags)))
-			for i, tag := range tags {
-				// 输入标签（带#号）
-				if err := tagContainer.Type("#"+tag, playwright.LocatorTypeOptions{Delay: playwright.Float(100)}); err != nil {
-					utils.Warn(fmt.Sprintf("[-] 输入标签 #%s 失败: %v", tag, err))
-					continue
-				}
-				// 按空格确认
-				if err := tagContainer.Press("Space"); err != nil {
-					utils.Warn(fmt.Sprintf("[-] 确认标签 #%s 失败: %v", tag, err))
-					continue
-				}
-				// 等待标签渲染
-				time.Sleep(300 * time.Millisecond)
-				ctx.ReportProgress(uploader.StepAddTags, 36+int((float64(i+1)/float64(len(tags)))*4), fmt.Sprintf("已添加 %d/%d 个标签", i+1, len(tags)))
-			}
-			utils.Info(fmt.Sprintf("[-] 完成添加 %d 个标签", len(tags)))
-			ctx.ReportProgress(uploader.StepAddTags, 40, "标签添加完成")
-			return uploader.StepResult{Step: uploader.StepAddTags, Success: true}
-		}
-
-		// 方案2：尝试使用 "添加话题" 按钮
-		utils.Info("[-] 尝试使用备选方案添加标签...")
-		addTopicBtn := ctx.Page.GetByText("添加话题").First()
-		if count, _ := addTopicBtn.Count(); count > 0 {
-			for i, tag := range tags {
-				if err := addTopicBtn.Click(); err != nil {
-					utils.Warn(fmt.Sprintf("[-] 点击添加话题按钮失败: %v", err))
-					continue
-				}
-				time.Sleep(500 * time.Millisecond)
-
-				// 输入标签
-				if err := ctx.Page.Keyboard().Type("#" + tag); err != nil {
-					utils.Warn(fmt.Sprintf("[-] 输入标签 #%s 失败: %v", tag, err))
-					continue
-				}
-				if err := ctx.Page.Keyboard().Press("Enter"); err != nil {
-					utils.Warn(fmt.Sprintf("[-] 确认标签 #%s 失败: %v", tag, err))
-					continue
-				}
-				time.Sleep(300 * time.Millisecond)
-				ctx.ReportProgress(uploader.StepAddTags, 36+int((float64(i+1)/float64(len(tags)))*4), fmt.Sprintf("已添加 %d/%d 个标签", i+1, len(tags)))
-			}
-			utils.Info(fmt.Sprintf("[-] 完成添加 %d 个标签", len(tags)))
-			ctx.ReportProgress(uploader.StepAddTags, 40, "标签添加完成")
-			return uploader.StepResult{Step: uploader.StepAddTags, Success: true}
-		}
-
-		// 如果都失败，记录警告但不阻塞流程（标签不是必须的）
-		utils.Warn("[-] 标签添加失败，继续执行")
-		return uploader.StepResult{Step: uploader.StepAddTags, Success: true}
-	}
-}
-
-// StepSetCoverDouyin 抖音设置封面步骤（改进版）
-func (u *Uploader) StepSetCoverDouyin(thumbnailPath string) uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		// 如果没有自定义封面，跳过
-		if thumbnailPath == "" {
-			ctx.ReportProgress(uploader.StepSetCover, 55, "未设置自定义封面，将使用自动封面")
-			return uploader.StepResult{Step: uploader.StepSetCover, Success: true}
-		}
-
-		ctx.ReportProgress(uploader.StepSetCover, 50, "正在设置自定义封面...")
-		utils.Info("[-] 正在设置自定义封面...")
-
-		// 点击"选择封面"
-		coverBtn := ctx.Page.GetByText("选择封面").First()
-		if count, _ := coverBtn.Count(); count == 0 {
-			utils.Warn("[-] 未找到选择封面按钮")
-			return uploader.StepResult{Step: uploader.StepSetCover, Success: true}
-		}
-
-		if err := coverBtn.Click(); err != nil {
-			utils.Warn(fmt.Sprintf("[-] 点击选择封面失败: %v", err))
-			return uploader.StepResult{Step: uploader.StepSetCover, Success: true}
-		}
-		time.Sleep(2 * time.Second)
-
-		// 点击"设置竖封面"
-		verticalCoverBtn := ctx.Page.GetByText("设置竖封面").First()
-		if count, _ := verticalCoverBtn.Count(); count > 0 {
-			if err := verticalCoverBtn.Click(); err != nil {
-				utils.Warn(fmt.Sprintf("[-] 点击设置竖封面失败: %v", err))
-			}
-			time.Sleep(2 * time.Second)
-		}
-
-		// 上传封面文件
-		coverInput := ctx.Page.Locator("div[class^='semi-upload upload'] >> input.semi-upload-hidden-input")
-		if err := coverInput.SetInputFiles(thumbnailPath); err != nil {
-			// 尝试其他选择器
-			coverInput = ctx.Page.Locator("input[type='file']").First()
-			if err := coverInput.SetInputFiles(thumbnailPath); err != nil {
-				utils.Warn(fmt.Sprintf("[-] 上传封面失败: %v", err))
-				// 关闭弹窗
-				ctx.Page.Keyboard().Press("Escape")
-				return uploader.StepResult{Step: uploader.StepSetCover, Success: true}
-			}
-		}
-
-		utils.Info("[-] 封面文件已上传，等待处理...")
-		time.Sleep(3 * time.Second)
-
-		// 点击完成按钮
-		finishBtn := ctx.Page.Locator("div#tooltip-container button:visible:has-text('完成'), div[class^='extractFooter'] button:visible:has-text('完成'), button:has-text('完成'):visible").First()
-		if count, _ := finishBtn.Count(); count > 0 {
-			if err := finishBtn.Click(); err != nil {
-				utils.Warn(fmt.Sprintf("[-] 点击完成按钮失败: %v", err))
-			}
-		}
-
-		// 等待封面设置对话框关闭
-		time.Sleep(2 * time.Second)
-
-		ctx.ReportProgress(uploader.StepSetCover, 60, "自定义封面设置完成")
-		utils.Info("[-] 自定义封面设置完成")
-		return uploader.StepResult{Step: uploader.StepSetCover, Success: true}
-	}
-}
-
-// StepHandleAutoCover 处理自动封面选择（当未设置自定义封面时）
-func (u *Uploader) StepHandleAutoCover() uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		// 检测"请设置封面后再发布"提示
-		coverPrompt := ctx.Page.GetByText("请设置封面后再发布").First()
-		visible, err := coverPrompt.IsVisible()
-		if err != nil || !visible {
-			return uploader.StepResult{Step: uploader.StepSetCover, Success: true}
-		}
-
-		ctx.ReportProgress(uploader.StepSetCover, 55, "检测到需要设置封面，自动选择推荐封面...")
-		utils.Info("[-] 检测到需要设置封面提示...")
-
-		// 选择第一个推荐封面
-		recommendCover := ctx.Page.Locator("[class^='recommendCover-']").First()
-		count, err := recommendCover.Count()
-		if err != nil || count == 0 {
-			ctx.TakeScreenshot("cover_not_found")
-			return uploader.StepResult{Step: uploader.StepSetCover, Success: false, Error: fmt.Errorf("推荐封面未找到")}
-		}
-
-		if err := recommendCover.Click(); err != nil {
-			return uploader.StepResult{Step: uploader.StepSetCover, Success: false, Error: fmt.Errorf("点击推荐封面失败: %w", err)}
-		}
-		time.Sleep(1 * time.Second)
-
-		// 处理确认弹窗 "是否确认应用此封面？"
-		confirmText := ctx.Page.GetByText("是否确认应用此封面？")
-		if count, _ := confirmText.Count(); count > 0 {
-			utils.Info("[-] 检测到确认弹窗，点击确定...")
-			confirmBtn := ctx.Page.GetByRole("button", playwright.PageGetByRoleOptions{Name: "确定"})
-			if err := confirmBtn.Click(); err != nil {
-				utils.Warn(fmt.Sprintf("[-] 点击确认按钮失败: %v", err))
-			}
-			time.Sleep(1 * time.Second)
-		}
-
-		ctx.ReportProgress(uploader.StepSetCover, 62, "封面选择完成")
-		utils.Info("[-] 已完成封面选择流程")
-		return uploader.StepResult{Step: uploader.StepSetCover, Success: true}
-	}
-}
-
-// StepClickPublishWithRetry 抖音发布步骤（带重试机制，参考Python实现）
-func (u *Uploader) StepClickPublishWithRetry() uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		ctx.ReportProgress(uploader.StepPublish, 85, "正在发布...")
-
-		maxRetries := 20                 // 最多重试20次
-		retryInterval := 5 * time.Second // 每次重试间隔5秒
-
-		for retryCount := 0; retryCount < maxRetries; retryCount++ {
-			// 检查页面是否已关闭
-			if ctx.BrowserCtx != nil && ctx.BrowserCtx.IsPageClosed() {
-				utils.Error("[-] 页面已被关闭，发布中断")
-				return uploader.StepResult{Step: uploader.StepPublish, Success: false, Error: fmt.Errorf("page closed by user")}
-			}
-
-			// 尝试点击发布按钮
-			publishBtn := ctx.Page.GetByRole("button", playwright.PageGetByRoleOptions{Name: "发布", Exact: playwright.Bool(true)})
-			if count, _ := publishBtn.Count(); count > 0 {
-				if err := publishBtn.Click(); err != nil {
-					utils.Warn(fmt.Sprintf("[-] 点击发布按钮失败: %v", err))
-				}
-			}
-
-			// 等待一下
-			time.Sleep(retryInterval)
-
-			// 检查是否发布成功（跳转到管理页面）
-			url := ctx.Page.URL()
-			if strings.Contains(url, "creator.douyin.com/creator-micro/content/manage") {
-				ctx.ReportProgress(uploader.StepPublish, 95, "发布成功")
-				ctx.TakeScreenshot("publish_success")
-				utils.Info("[-] 视频发布成功")
-				return uploader.StepResult{Step: uploader.StepPublish, Success: true}
-			}
-
-			// 尝试处理封面问题
-			coverPrompt := ctx.Page.GetByText("请设置封面后再发布").First()
-			if visible, _ := coverPrompt.IsVisible(); visible {
-				utils.Info("[-] 检测到需要设置封面，尝试自动选择...")
-				// 调用自动封面选择
-				recommendCover := ctx.Page.Locator("[class^='recommendCover-']").First()
-				if count, _ := recommendCover.Count(); count > 0 {
-					if err := recommendCover.Click(); err != nil {
-						utils.Warn(fmt.Sprintf("[-] 点击推荐封面失败: %v", err))
-					}
-					time.Sleep(1 * time.Second)
-					// 处理确认弹窗
-					confirmBtn := ctx.Page.GetByRole("button", playwright.PageGetByRoleOptions{Name: "确定"})
-					if count, _ := confirmBtn.Count(); count > 0 {
-						confirmBtn.Click()
-						time.Sleep(1 * time.Second)
-					}
-				}
-			}
-
-			// 截图记录发布状态
-			if retryCount%5 == 0 {
-				ctx.TakeScreenshot(fmt.Sprintf("publishing_retry_%d", retryCount))
-			}
-
-			utils.Info(fmt.Sprintf("[-] 视频正在发布中... (尝试 %d/%d)", retryCount+1, maxRetries))
-		}
-
-		// 超过最大重试次数
-		ctx.TakeScreenshot("publish_max_retry")
-		return uploader.StepResult{Step: uploader.StepPublish, Success: false, Error: fmt.Errorf("发布失败，已重试%d次", maxRetries)}
-	}
-}
-
-// StepSyncThirdParty 第三方平台同步（头条/西瓜）（中优先级改进）
-func (u *Uploader) StepSyncThirdParty(syncToutiao, syncXigua bool) uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		if !syncToutiao && !syncXigua {
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		ctx.ReportProgress(uploader.StepFillContent, 64, "正在设置第三方同步...")
-
-		// 查找第三方同步开关
-		thirdPartySwitch := ctx.Page.Locator("[class^='info'] > [class^='first-part'] div div.semi-switch")
-		count, err := thirdPartySwitch.Count()
-		if err != nil || count == 0 {
-			utils.Info("[-] 未找到第三方同步开关，跳过")
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		// 检查是否已选中
-		className, _ := thirdPartySwitch.GetAttribute("class")
-		if !strings.Contains(className, "semi-switch-checked") {
-			// 点击开启同步
-			switchInput := thirdPartySwitch.Locator("input.semi-switch-native-control")
-			if err := switchInput.Click(); err != nil {
-				utils.Warn(fmt.Sprintf("[-] 开启第三方同步失败: %v", err))
-			} else {
-				utils.Info("[-] 已开启第三方同步")
-			}
-		} else {
-			utils.Info("[-] 第三方同步已开启")
-		}
-
-		ctx.ReportProgress(uploader.StepFillContent, 66, "第三方同步设置完成")
-		return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-	}
-}
-
-// StepSetProductLink 设置商品链接（中优先级改进）
-func (u *Uploader) StepSetProductLink(productLink, productTitle string) uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		if productLink == "" {
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		ctx.ReportProgress(uploader.StepFillContent, 67, "正在设置商品链接...")
-
-		// 定位"添加标签"文本，然后向上导航到容器，再找到下拉框
-		addTagText := ctx.Page.GetByText("添加标签")
-		if count, _ := addTagText.Count(); count == 0 {
-			utils.Info("[-] 未找到添加标签按钮，跳过商品链接设置")
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		// 点击添加标签区域
-		dropdown := addTagText.Locator("xpath=../../..").Locator(".semi-select").First()
-		if err := dropdown.Click(); err != nil {
-			utils.Warn(fmt.Sprintf("[-] 点击添加标签下拉框失败: %v", err))
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		// 等待下拉选项出现
-		shoppingCartOption := ctx.Page.Locator("[role='option']:has-text('购物车')")
-		if err := shoppingCartOption.WaitFor(playwright.LocatorWaitForOptions{Timeout: playwright.Float(5000)}); err != nil {
-			utils.Warn(fmt.Sprintf("[-] 等待购物车选项失败: %v", err))
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		// 选择"购物车"选项
-		if err := shoppingCartOption.Click(); err != nil {
-			utils.Warn(fmt.Sprintf("[-] 选择购物车选项失败: %v", err))
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		// 等待商品链接输入框出现
-		linkInput := ctx.Page.Locator("input[placeholder='粘贴商品链接']")
-		if err := linkInput.WaitFor(playwright.LocatorWaitForOptions{Timeout: playwright.Float(5000)}); err != nil {
-			utils.Warn(fmt.Sprintf("[-] 等待商品链接输入框失败: %v", err))
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		// 输入商品链接
-		if err := linkInput.Fill(productLink); err != nil {
-			utils.Warn(fmt.Sprintf("[-] 填写商品链接失败: %v", err))
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		// 点击"添加链接"按钮
-		addButton := ctx.Page.GetByText("添加链接")
-		buttonClass, _ := addButton.GetAttribute("class")
-		if strings.Contains(buttonClass, "disable") {
-			utils.Warn("[-] 添加链接按钮不可用，可能是链接格式不正确")
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		if err := addButton.Click(); err != nil {
-			utils.Warn(fmt.Sprintf("[-] 点击添加链接按钮失败: %v", err))
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		// 处理商品短标题弹窗（如果有）
-		if productTitle != "" {
-			u.handleProductDialog(ctx, productTitle)
-		}
-
-		ctx.ReportProgress(uploader.StepFillContent, 70, "商品链接设置完成")
-		return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-	}
-}
-
-// handleProductDialog 处理商品短标题弹窗
-func (u *Uploader) handleProductDialog(ctx *uploader.Context, productTitle string) {
-	// 等待短标题输入框出现
-	titleInput := ctx.Page.Locator("input[placeholder*='短标题'], input[placeholder*='标题']").First()
-	if err := titleInput.WaitFor(playwright.LocatorWaitForOptions{Timeout: playwright.Float(3000)}); err != nil {
-		utils.Warn("[-] 未找到商品短标题输入框")
-		return
-	}
-
-	if err := titleInput.Fill(productTitle); err != nil {
-		utils.Warn(fmt.Sprintf("[-] 填写商品短标题失败: %v", err))
-		return
-	}
-
-	// 点击确定按钮
-	confirmBtn := ctx.Page.GetByRole("button", playwright.PageGetByRoleOptions{Name: "确定"})
-	if err := confirmBtn.Click(); err != nil {
-		utils.Warn(fmt.Sprintf("[-] 点击确定按钮失败: %v", err))
-	}
-}
-
-// StepSetLocationDouyin 抖音位置设置（低优先级改进）
-func (u *Uploader) StepSetLocationDouyin(location string) uploader.StepFunc {
-	return func(ctx *uploader.Context) uploader.StepResult {
-		if location == "" {
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		ctx.ReportProgress(uploader.StepFillContent, 71, "正在设置位置...")
-
-		// 定位位置输入框
-		locationInput := ctx.Page.Locator("div.semi-select span:has-text('输入地理位置')")
-		if count, _ := locationInput.Count(); count == 0 {
-			utils.Info("[-] 未找到位置输入框，跳过位置设置")
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		if err := locationInput.Click(); err != nil {
-			utils.Warn(fmt.Sprintf("[-] 点击位置输入框失败: %v", err))
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		// 清空原有内容
-		if err := ctx.Page.Keyboard().Press("Backspace"); err != nil {
-			utils.Warn(fmt.Sprintf("[-] 清空位置输入框失败: %v", err))
-		}
-
-		time.Sleep(2 * time.Second)
-
-		// 输入位置
-		if err := ctx.Page.Keyboard().Type(location); err != nil {
-			utils.Warn(fmt.Sprintf("[-] 输入位置失败: %v", err))
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		time.Sleep(2 * time.Second)
-
-		// 选择第一个选项
-		firstOption := ctx.Page.Locator("div[role='listbox'] [role='option']").First()
-		if err := firstOption.Click(); err != nil {
-			utils.Warn(fmt.Sprintf("[-] 选择位置选项失败: %v", err))
-			return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-		}
-
-		ctx.ReportProgress(uploader.StepFillContent, 73, "位置设置完成")
-		return uploader.StepResult{Step: uploader.StepFillContent, Success: true}
-	}
-}
-
-// Login 登录
-func (u *Uploader) Login() error {
-	ctx := context.Background()
-
-	// 从浏览器池获取上下文
-	browserCtx, err := browserPool.GetContext(ctx, u.GetCookiePath(), u.GetContextOptions())
+	browserCtx, err := browserPool.GetContext(ctx, u.cookiePath, nil)
 	if err != nil {
-		return fmt.Errorf("get browser context failed: %w", err)
+		return fmt.Errorf("获取浏览器失败: %w", err)
 	}
 	defer browserCtx.Release()
 
 	page, err := browserCtx.GetPage()
 	if err != nil {
-		return fmt.Errorf("get page failed: %w", err)
+		return fmt.Errorf("获取页面失败: %w", err)
 	}
 
-	// 访问抖音创作者中心
-	utils.Info("[-] 正在打开抖音创作者中心...")
-	if _, err := page.Goto("https://creator.douyin.com/", playwright.PageGotoOptions{
-		WaitUntil: playwright.WaitUntilStateNetworkidle,
+	// 导航到上传页面
+	utils.InfoWithPlatform(u.platform, "正在打开上传页面...")
+	if _, err := page.Goto("https://creator.douyin.com/creator-micro/content/upload", playwright.PageGotoOptions{
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
 	}); err != nil {
-		return fmt.Errorf("goto creator center failed: %w", err)
-	}
-
-	// 等待页面完全加载
-	if err := browserCtx.WaitForPageLoad(); err != nil {
-		utils.Warn(fmt.Sprintf("[-] 等待页面加载警告: %v", err))
+		return fmt.Errorf("打开上传页面失败: %w", err)
 	}
 	time.Sleep(3 * time.Second)
 
-	// 等待用户登录
-	utils.Info("[-] 请在浏览器窗口中完成登录...")
+	// 上传视频
+	utils.InfoWithPlatform(u.platform, "上传视频中...")
+	if err := u.uploadVideo(ctx, page, browserCtx, task.VideoPath); err != nil {
+		return fmt.Errorf("上传视频失败: %w", err)
+	}
 
-	// 检测登录成功
-	timeout := time.After(5 * time.Minute)
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+	time.Sleep(2 * time.Second)
 
-	for {
+	// 填写标题（限制30字符）
+	if task.Title != "" {
+		utils.InfoWithPlatform(u.platform, "填写标题...")
+		if err := u.fillTitle(page, task.Title); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("填写标题失败: %v", err))
+		}
+	}
+
+	// 填写描述
+	if task.Description != "" {
+		utils.InfoWithPlatform(u.platform, "填写描述...")
+		if err := u.fillDescription(page, task.Description); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("填写描述失败: %v", err))
+		}
+	}
+
+	// 添加话题标签
+	if len(task.Tags) > 0 {
+		utils.InfoWithPlatform(u.platform, fmt.Sprintf("添加%d个标签...", len(task.Tags)))
+		if err := u.addTags(page, task.Tags); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("添加标签失败: %v", err))
+		}
+	}
+
+	// 设置封面（始终执行，有自定义封面时上传，无则使用默认）
+	if err := u.setCover(page, task.Thumbnail); err != nil {
+		utils.WarnWithPlatform(u.platform, fmt.Sprintf("设置封面失败: %v", err))
+	}
+
+	// 添加商品链接
+	if task.ProductLink != "" {
+		utils.InfoWithPlatform(u.platform, "添加商品链接...")
+		if err := u.addProductLink(page, task.ProductLink, task.ProductTitle); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("添加商品链接失败: %v", err))
+		}
+	}
+
+	// 设置同步选项
+	if task.SyncToutiao || task.SyncXigua {
+		utils.InfoWithPlatform(u.platform, "设置同步选项...")
+		if err := u.setSyncOptions(page, task.SyncToutiao, task.SyncXigua); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("设置同步选项失败: %v", err))
+		}
+	}
+
+	// 设置定时发布
+	if task.ScheduleTime != nil && *task.ScheduleTime != "" {
+		utils.InfoWithPlatform(u.platform, fmt.Sprintf("设置定时发布: %s", *task.ScheduleTime))
+		if err := u.setScheduleTime(page, *task.ScheduleTime); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("设置定时发布失败: %v", err))
+		}
+	}
+
+	// 点击发布
+	utils.InfoWithPlatform(u.platform, "准备发布...")
+	if err := u.publish(page, browserCtx); err != nil {
+		return fmt.Errorf("发布失败: %w", err)
+	}
+
+	utils.SuccessWithPlatform(u.platform, "发布成功")
+	return nil
+}
+
+// uploadVideo 上传视频
+func (u *Uploader) uploadVideo(ctx context.Context, page playwright.Page, browserCtx *browser.PooledContext, videoPath string) error {
+	utils.InfoWithPlatform(u.platform, "正在上传视频...")
+
+	// 定位文件输入框
+	inputLocator := page.Locator("div[class^='container'] input[type='file']").First()
+	if err := inputLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(10000),
+	}); err != nil {
+		// 兜底：尝试通用选择器
+		inputLocator = page.Locator("input[type='file']").First()
+		if err := inputLocator.WaitFor(playwright.LocatorWaitForOptions{
+			Timeout: playwright.Float(5000),
+		}); err != nil {
+			return fmt.Errorf("未找到文件输入框: %w", err)
+		}
+	}
+
+	if err := inputLocator.SetInputFiles(videoPath); err != nil {
+		return fmt.Errorf("设置视频文件失败: %w", err)
+	}
+
+	// 等待上传完成
+	utils.InfoWithPlatform(u.platform, "等待视频上传完成...")
+	if err := u.waitForUploadComplete(ctx, page, browserCtx); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// waitForUploadComplete 等待视频上传完成
+func (u *Uploader) waitForUploadComplete(ctx context.Context, page playwright.Page, browserCtx *browser.PooledContext) error {
+	uploadTimeout := 10 * time.Minute
+	uploadCheckInterval := 2 * time.Second
+	uploadStartTime := time.Now()
+
+	for time.Since(uploadStartTime) < uploadTimeout {
 		select {
-		case <-timeout:
-			return fmt.Errorf("login timeout")
-		case <-ticker.C:
-			// 检查页面是否已关闭
-			if browserCtx.IsPageClosed() {
-				utils.Error("[-] 页面已被关闭，登录中断")
-				return fmt.Errorf("page closed by user")
+		case <-ctx.Done():
+			return fmt.Errorf("上传已取消")
+		default:
+		}
+
+		if browserCtx.IsPageClosed() {
+			return fmt.Errorf("浏览器已关闭")
+		}
+
+		// 检测方式1：视频预览区域出现
+		videoPreview := page.Locator("video, .video-preview, [class*='videoPreview'], div[class*='player']").First()
+		if count, _ := videoPreview.Count(); count > 0 {
+			if visible, _ := videoPreview.IsVisible(); visible {
+				utils.InfoWithPlatform(u.platform, "视频上传完成（检测到预览）")
+				return nil
+			}
+		}
+
+		// 检测方式2：上传进度条消失
+		progressBar := page.Locator("div[class*='progress'], div[class*='uploading']").First()
+		if count, _ := progressBar.Count(); count == 0 {
+			// 检查是否有视频信息
+			videoInfo := page.Locator("div[class*='video-info'], div[class*='mediaInfo']").First()
+			if count, _ := videoInfo.Count(); count > 0 {
+				utils.InfoWithPlatform(u.platform, "视频上传完成")
+				return nil
+			}
+		}
+
+		// 检测方式3："上传成功"文本
+		successText := page.Locator("text=/上传成功|上传完成/").First()
+		if count, _ := successText.Count(); count > 0 {
+			if visible, _ := successText.IsVisible(); visible {
+				utils.InfoWithPlatform(u.platform, "视频上传完成（检测到成功文本）")
+				return nil
+			}
+		}
+
+		// 检测上传失败
+		errorText := page.Locator("text=/上传失败|上传出错/").First()
+		if count, _ := errorText.Count(); count > 0 {
+			return fmt.Errorf("视频上传失败")
+		}
+
+		time.Sleep(uploadCheckInterval)
+	}
+
+	return fmt.Errorf("上传超时")
+}
+
+// fillTitle 填写标题（限制30字符）
+func (u *Uploader) fillTitle(page playwright.Page, title string) error {
+	if title == "" {
+		return nil
+	}
+
+	utils.InfoWithPlatform(u.platform, "填写标题...")
+
+	// 限制30字符
+	if len(title) > 30 {
+		runes := []rune(title)
+		if len(runes) > 30 {
+			title = string(runes[:30])
+		}
+	}
+
+	// 尝试多种选择器定位标题输入框
+	titleContainer := page.GetByText("作品标题").Locator("..").Locator("xpath=following-sibling::div[1]").Locator("input")
+	if err := titleContainer.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+	}); err != nil {
+		// 兜底：尝试其他选择器
+		titleContainer = page.Locator(".notranslate").First()
+		if err := titleContainer.WaitFor(playwright.LocatorWaitForOptions{
+			Timeout: playwright.Float(3000),
+		}); err != nil {
+			return fmt.Errorf("未找到标题输入框: %w", err)
+		}
+	}
+
+	count, _ := titleContainer.Count()
+	if count > 0 {
+		if err := titleContainer.Fill(title); err != nil {
+			// 兜底：使用键盘输入
+			titleContainer.Click()
+			page.Keyboard().Press("Control+KeyA")
+			page.Keyboard().Press("Delete")
+			page.Keyboard().Type(title)
+		}
+	} else {
+		// 兜底方案
+		titleInput := page.Locator(".notranslate").First()
+		if count, _ := titleInput.Count(); count > 0 {
+			titleInput.Click()
+			page.Keyboard().Press("Control+KeyA")
+			page.Keyboard().Press("Delete")
+			page.Keyboard().Type(title)
+			page.Keyboard().Press("Enter")
+		}
+	}
+
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("标题已填写: %s", title))
+	time.Sleep(500 * time.Millisecond)
+	return nil
+}
+
+// fillDescription 填写描述
+func (u *Uploader) fillDescription(page playwright.Page, description string) error {
+	utils.InfoWithPlatform(u.platform, "填写描述...")
+
+	// 定位描述输入框
+	descContainer := page.GetByText("作品描述").Locator("..").Locator("xpath=following-sibling::div[1]").Locator("textarea, .notranslate").First()
+	if err := descContainer.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+	}); err != nil {
+		// 兜底：尝试其他选择器
+		descContainer = page.Locator(".notranslate").Nth(1)
+		if err := descContainer.WaitFor(playwright.LocatorWaitForOptions{
+			Timeout: playwright.Float(3000),
+		}); err != nil {
+			return fmt.Errorf("未找到描述输入框: %w", err)
+		}
+	}
+
+	count, _ := descContainer.Count()
+	if count > 0 {
+		if err := descContainer.Fill(description); err != nil {
+			// 兜底：使用键盘输入
+			descContainer.Click()
+			page.Keyboard().Press("Control+KeyA")
+			page.Keyboard().Press("Delete")
+			page.Keyboard().Type(description)
+		}
+	} else {
+		return fmt.Errorf("未找到描述输入框")
+	}
+
+	utils.InfoWithPlatform(u.platform, "描述已填写")
+	time.Sleep(500 * time.Millisecond)
+	return nil
+}
+
+// addTags 添加话题标签
+func (u *Uploader) addTags(page playwright.Page, tags []string) error {
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("添加%d个标签...", len(tags)))
+
+	// 定位标签输入区域
+	tagContainer := page.Locator(".zone-container").First()
+	if err := tagContainer.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+	}); err != nil {
+		// 兜底：尝试其他选择器
+		tagContainer = page.Locator("div[class*='tag'], div[class*='topic']").First()
+		if err := tagContainer.WaitFor(playwright.LocatorWaitForOptions{
+			Timeout: playwright.Float(3000),
+		}); err != nil {
+			return fmt.Errorf("未找到标签输入区域: %w", err)
+		}
+	}
+
+	count, _ := tagContainer.Count()
+	if count > 0 {
+		for _, tag := range tags {
+			cleanTag := strings.TrimSpace(tag)
+			cleanTag = strings.ReplaceAll(cleanTag, "#", "")
+			if cleanTag == "" {
+				continue
 			}
 
-			// 检查是否已进入创作者中心
-			url := page.URL()
-			utils.Info(fmt.Sprintf("[-] 当前URL: %s", url))
+			tagContainer.Type("#"+cleanTag, playwright.LocatorTypeOptions{Delay: playwright.Float(100)})
+			tagContainer.Press("Space")
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
 
-			// 使用 strings.Contains 匹配URL
-			if strings.Contains(url, "creator.douyin.com") {
-				// 等待一下确保页面元素加载完成
-				time.Sleep(1 * time.Second)
+	utils.InfoWithPlatform(u.platform, "标签添加完成")
+	return nil
+}
 
-				// 检查创作者中心特征元素（根据实际页面）
-				homeMenu, _ := page.GetByText("首页").Count()
-				contentManage, _ := page.GetByText("内容管理").Count()
-				publishVideo, _ := page.GetByText("发布视频").Count()
+// setCover 设置封面
+func (u *Uploader) setCover(page playwright.Page, coverPath string) error {
+	utils.InfoWithPlatform(u.platform, "设置封面...")
 
-				if homeMenu > 0 || contentManage > 0 || publishVideo > 0 {
-					utils.Info("[-] 登录成功，已进入创作者中心")
-					return nil
+	// 点击封面设置按钮
+	coverBtn := page.GetByText("选择封面").First()
+	if err := coverBtn.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(5000),
+	}); err != nil {
+		return fmt.Errorf("未找到封面设置按钮: %w", err)
+	}
+
+	if err := coverBtn.Click(); err != nil {
+		return fmt.Errorf("点击封面设置按钮失败: %w", err)
+	}
+	time.Sleep(2 * time.Second)
+
+	// 上传自定义封面
+	if coverPath != "" {
+		if _, err := os.Stat(coverPath); err == nil {
+			utils.InfoWithPlatform(u.platform, "上传自定义封面...")
+
+			// 直接定位隐藏的文件输入框（使用class选择器更可靠）
+			coverInput := page.Locator(`input.semi-upload-hidden-input[type="file"]`).First()
+			if count, _ := coverInput.Count(); count == 0 {
+				// 兜底：通用选择器
+				coverInput = page.Locator(`input[type="file"]`).First()
+			}
+
+			if count, _ := coverInput.Count(); count > 0 {
+				if err := coverInput.SetInputFiles(coverPath); err != nil {
+					utils.WarnWithPlatform(u.platform, fmt.Sprintf("上传封面失败: %v", err))
+				} else {
+					utils.InfoWithPlatform(u.platform, "封面上传中...")
+					time.Sleep(3 * time.Second)
 				}
 			}
 		}
 	}
+
+	// 点击"设置竖封面"按钮切换到竖封面界面
+	verticalBtn := page.Locator(`button:has-text("设置竖封面")`).First()
+	if err := verticalBtn.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(5000),
+	}); err != nil {
+		utils.WarnWithPlatform(u.platform, "未找到设置竖封面按钮")
+	} else {
+		if err := verticalBtn.Click(); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("点击设置竖封面按钮失败: %v", err))
+		} else {
+			utils.InfoWithPlatform(u.platform, "已切换到竖封面")
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	// 点击完成按钮
+	finishBtn := page.Locator(`button:has-text("完成")`).First()
+	if err := finishBtn.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(5000),
+	}); err != nil {
+		// 兜底：尝试其他完成按钮选择器
+		finishBtn = page.Locator(`div#tooltip-container button:visible:has-text("完成")`).First()
+		if count, _ := finishBtn.Count(); count == 0 {
+			finishBtn = page.Locator(`div[class^="extractFooter"] button:has-text("完成")`).First()
+		}
+	}
+
+	if count, _ := finishBtn.Count(); count > 0 {
+		if err := finishBtn.Click(); err != nil {
+			utils.WarnWithPlatform(u.platform, fmt.Sprintf("点击完成按钮失败: %v", err))
+		} else {
+			utils.InfoWithPlatform(u.platform, "已点击完成按钮")
+		}
+	}
+	time.Sleep(2 * time.Second)
+
+	utils.InfoWithPlatform(u.platform, "封面设置完成")
+	return nil
+}
+
+// addProductLink 添加商品链接
+func (u *Uploader) addProductLink(page playwright.Page, productLink, productTitle string) error {
+	utils.InfoWithPlatform(u.platform, "添加商品链接...")
+
+	// 点击"添加标签"
+	addTagBtn := page.GetByText("添加标签").First()
+	if err := addTagBtn.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+	}); err != nil {
+		return fmt.Errorf("未找到添加标签按钮: %w", err)
+	}
+
+	if err := addTagBtn.Click(); err != nil {
+		return fmt.Errorf("点击添加标签失败: %w", err)
+	}
+	time.Sleep(1 * time.Second)
+
+	// 点击"购物车"
+	cartBtn := page.GetByText("购物车").First()
+	if count, _ := cartBtn.Count(); count > 0 {
+		cartBtn.Click()
+		time.Sleep(1 * time.Second)
+	}
+
+	// 填写商品链接
+	linkInput := page.Locator("input[placeholder='添加商品链接']").First()
+	if err := linkInput.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+	}); err != nil {
+		return fmt.Errorf("未找到商品链接输入框: %w", err)
+	}
+
+	if err := linkInput.Fill(productLink); err != nil {
+		return fmt.Errorf("填写商品链接失败: %w", err)
+	}
+
+	// 填写商品短标题（限制10字符）
+	if productTitle != "" {
+		shortTitle := productTitle
+		if len(shortTitle) > 10 {
+			runes := []rune(shortTitle)
+			if len(runes) > 10 {
+				shortTitle = string(runes[:10])
+			}
+		}
+
+		titleInput := page.Locator("input[placeholder*='短标题']").First()
+		if count, _ := titleInput.Count(); count > 0 {
+			titleInput.Fill(shortTitle)
+		}
+	}
+
+	utils.InfoWithPlatform(u.platform, "商品链接添加完成")
+	time.Sleep(1 * time.Second)
+	return nil
+}
+
+// setSyncOptions 设置同步选项
+func (u *Uploader) setSyncOptions(page playwright.Page, syncToutiao, syncXigua bool) error {
+	utils.InfoWithPlatform(u.platform, "设置同步选项...")
+
+	// 同步到今日头条
+	if syncToutiao {
+		toutiaoCheckbox := page.Locator("text=同步到今日头条").Locator("xpath=../input[type='checkbox']").First()
+		if count, _ := toutiaoCheckbox.Count(); count > 0 {
+			isChecked, _ := toutiaoCheckbox.IsChecked()
+			if !isChecked {
+				toutiaoCheckbox.Check()
+				utils.InfoWithPlatform(u.platform, "已勾选同步到今日头条")
+			}
+		}
+	}
+
+	// 同步到西瓜视频
+	if syncXigua {
+		xiguaCheckbox := page.Locator("text=同步到西瓜视频").Locator("xpath=../input[type='checkbox']").First()
+		if count, _ := xiguaCheckbox.Count(); count > 0 {
+			isChecked, _ := xiguaCheckbox.IsChecked()
+			if !isChecked {
+				xiguaCheckbox.Check()
+				utils.InfoWithPlatform(u.platform, "已勾选同步到西瓜视频")
+			}
+		}
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	return nil
+}
+
+// setScheduleTime 设置定时发布
+func (u *Uploader) setScheduleTime(page playwright.Page, scheduleTime string) error {
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("设置定时发布时间: %s", scheduleTime))
+
+	// 解析时间
+	targetTime, err := time.Parse("2006-01-02 15:04", scheduleTime)
+	if err != nil {
+		return fmt.Errorf("解析时间失败: %w", err)
+	}
+
+	// 点击定时发布选项
+	scheduleLabel := page.GetByText("定时发布").First()
+	if err := scheduleLabel.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+	}); err != nil {
+		return fmt.Errorf("未找到定时发布选项: %w", err)
+	}
+
+	if err := scheduleLabel.Click(); err != nil {
+		return fmt.Errorf("点击定时发布失败: %w", err)
+	}
+	time.Sleep(1 * time.Second)
+
+	// 选择日期
+	datePicker := page.Locator("input[placeholder*='日期'], div[class*='date-picker']").First()
+	if err := datePicker.Click(); err != nil {
+		return fmt.Errorf("点击日期选择器失败: %w", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// 选择目标日期
+	dateStr := targetTime.Format("2006-01-02")
+	dateCell := page.Locator(fmt.Sprintf("td[title='%s'], td:has-text('%d')", dateStr, targetTime.Day())).First()
+	if count, _ := dateCell.Count(); count > 0 {
+		dateCell.Click()
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// 选择时间
+	timePicker := page.Locator("input[placeholder*='时间']").First()
+	if err := timePicker.Click(); err != nil {
+		return fmt.Errorf("点击时间选择器失败: %w", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// 输入时间
+	timeStr := targetTime.Format("15:04")
+	page.Keyboard().Press("Control+KeyA")
+	page.Keyboard().Type(timeStr)
+	page.Keyboard().Press("Enter")
+
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("定时发布时间设置完成: %s", scheduleTime))
+	time.Sleep(1 * time.Second)
+	return nil
+}
+
+// publish 点击发布并检测结果
+func (u *Uploader) publish(page playwright.Page, browserCtx *browser.PooledContext) error {
+	maxRetries := 20
+
+	for retryCount := 0; retryCount < maxRetries; retryCount++ {
+		if browserCtx.IsPageClosed() {
+			return fmt.Errorf("浏览器已关闭")
+		}
+
+		// 定位发布按钮
+		publishBtn := page.GetByRole("button", playwright.PageGetByRoleOptions{
+			Name:  "发布",
+			Exact: playwright.Bool(true),
+		})
+		if count, _ := publishBtn.Count(); count > 0 {
+			if err := publishBtn.Click(); err != nil {
+				utils.WarnWithPlatform(u.platform, fmt.Sprintf("点击发布按钮失败: %v", err))
+			}
+		}
+
+		time.Sleep(5 * time.Second)
+
+		// 检测发布结果
+		url := page.URL()
+		if strings.Contains(url, "creator.douyin.com/creator-micro/content/manage") {
+			utils.InfoWithPlatform(u.platform, "发布成功，页面已跳转")
+			return nil
+		}
+
+		// 处理封面未设置提示
+		coverPrompt := page.GetByText("请设置封面后再发布").First()
+		if visible, _ := coverPrompt.IsVisible(); visible {
+			utils.InfoWithPlatform(u.platform, "检测到封面未设置，尝试选择推荐封面...")
+			recommendCover := page.Locator("[class^='recommendCover-']").First()
+			if count, _ := recommendCover.Count(); count > 0 {
+				recommendCover.Click()
+				time.Sleep(1 * time.Second)
+				confirmBtn := page.GetByRole("button", playwright.PageGetByRoleOptions{Name: "确定"})
+				if count, _ := confirmBtn.Count(); count > 0 {
+					confirmBtn.Click()
+					time.Sleep(1 * time.Second)
+				}
+			}
+		}
+
+		// 检测成功提示
+		successText := page.Locator("text=/发布成功|提交成功/").First()
+		if count, _ := successText.Count(); count > 0 {
+			if visible, _ := successText.IsVisible(); visible {
+				utils.InfoWithPlatform(u.platform, "发布成功")
+				return nil
+			}
+		}
+
+		utils.InfoWithPlatform(u.platform, fmt.Sprintf("正在发布中... (尝试 %d/%d)", retryCount+1, maxRetries))
+	}
+
+	return fmt.Errorf("发布超时，已重试%d次", maxRetries)
+}
+
+// Login 登录
+func (u *Uploader) Login() error {
+	debugLog("Login开始 - cookiePath: '%s'", u.cookiePath)
+	if u.cookiePath == "" {
+		return fmt.Errorf("cookie路径为空")
+	}
+
+	ctx := context.Background()
+	utils.InfoWithPlatform(u.platform, fmt.Sprintf("Cookie保存路径: %s", u.cookiePath))
+
+	browserCtx, err := browserPool.GetContext(ctx, "", nil)
+	if err != nil {
+		return fmt.Errorf("获取浏览器失败: %w", err)
+	}
+	defer browserCtx.Release()
+
+	page, err := browserCtx.GetPage()
+	if err != nil {
+		return fmt.Errorf("获取页面失败: %w", err)
+	}
+
+	utils.InfoWithPlatform(u.platform, "正在打开创作者中心...")
+	if _, err := page.Goto("https://creator.douyin.com/", playwright.PageGotoOptions{
+		WaitUntil: playwright.WaitUntilStateNetworkidle,
+	}); err != nil {
+		return fmt.Errorf("打开登录页面失败: %w", err)
+	}
+
+	time.Sleep(3 * time.Second)
+
+	utils.InfoWithPlatform(u.platform, "请在浏览器窗口中完成登录...")
+
+	// 使用Cookie检测机制等待登录成功
+	cookieConfig, ok := browser.GetCookieConfig("douyin")
+	if !ok {
+		return fmt.Errorf("获取抖音Cookie配置失败")
+	}
+
+	if err := browserCtx.WaitForLoginCookies(cookieConfig); err != nil {
+		return fmt.Errorf("等待登录Cookie失败: %w", err)
+	}
+
+	utils.SuccessWithPlatform(u.platform, "登录成功，检测到sessionid Cookie")
+	if err := browserCtx.SaveCookiesTo(u.cookiePath); err != nil {
+		return fmt.Errorf("保存Cookie失败: %w", err)
+	}
+	utils.InfoWithPlatform(u.platform, "Cookie已保存")
+	return nil
 }

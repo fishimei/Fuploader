@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -203,15 +204,18 @@ func (s *EnhancedScheduler) executeTask(task *database.ScheduledTask) {
 		}
 	}
 
+	// 将 ScheduleTime 转换为字符串格式
+	scheduleTimeStr := task.ScheduleTime.Format("2006-01-02 15:04")
+
 	videoTask := &types.VideoTask{
-		VideoPath:   task.VideoPath,
-		Title:       title,
-		Description: task.Description,
+		VideoPath:    task.VideoPath,
+		Title:        title,
+		Description:  task.Description,
+		ScheduleTime: &scheduleTimeStr,
 	}
 	// 解析 Tags
 	if task.Tags != "" {
-		// 这里假设 tags 是逗号分隔的字符串
-		// 实际实现可能需要 JSON 解析
+		videoTask.Tags = strings.Split(task.Tags, ",")
 	}
 
 	// 执行上传

@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useVideoStore } from '../stores'
 import { formatFileSize, formatDuration, formatDateTime, truncateText } from '../utils/format'
+import { extractVideoFrame, uploadThumbnail, clearThumbnail, selectImageFile } from '../api/video'
 import type { Video } from '../types'
 
 const videoStore = useVideoStore()
@@ -12,9 +13,18 @@ const editingVideo = ref<Video | null>(null)
 const editForm = ref({
   title: '',
   description: '',
-  tags: [] as string[]
+  tags: [] as string[],
+  thumbnail: ''
 })
 const tagInput = ref('')
+const extractingFrame = ref(false)
+const uploadingThumbnail = ref(false)
+
+const showTimeSlider = ref(false)
+const frameTime = ref(0)
+const maxFrameTime = computed(() => {
+  return editingVideo.value?.duration ? Math.floor(editingVideo.value.duration) : 0
+})
 
 async function handleSelectVideo() {
   try {
@@ -38,7 +48,7 @@ async function handleDeleteVideo(video: Video) {
         type: 'warning'
       }
     )
-    
+
     await videoStore.deleteVideo(video.id)
     ElMessage.success('视频已删除')
   } catch (error) {
@@ -53,20 +63,24 @@ function openEditDialog(video: Video) {
   editForm.value = {
     title: video.title || '',
     description: video.description || '',
-    tags: video.tags || []
+    tags: video.tags || [],
+    thumbnail: video.thumbnail || ''
   }
+  frameTime.value = 0
+  showTimeSlider.value = false
   showEditDialog.value = true
 }
 
 async function handleSaveEdit() {
   if (!editingVideo.value) return
-  
+
   try {
     const updatedVideo = {
       ...editingVideo.value,
       title: editForm.value.title,
       description: editForm.value.description,
-      tags: editForm.value.tags
+      tags: editForm.value.tags,
+      thumbnail: editForm.value.thumbnail
     }
     await videoStore.updateVideo(updatedVideo)
     ElMessage.success('保存成功')
@@ -86,6 +100,64 @@ function handleAddTag() {
 
 function handleRemoveTag(index: number) {
   editForm.value.tags.splice(index, 1)
+}
+
+function toggleTimeSlider() {
+  showTimeSlider.value = !showTimeSlider.value
+}
+
+async function handleExtractFrame() {
+  if (!editingVideo.value) return
+
+  extractingFrame.value = true
+  try {
+    const result = await extractVideoFrame(editingVideo.value.id, frameTime.value)
+    editForm.value.thumbnail = result.thumbnailPath
+    ElMessage.success('封面提取成功')
+    showTimeSlider.value = false
+  } catch (error: any) {
+    const errorMsg = error?.message || error?.toString() || '未知错误'
+    ElMessage.error(`封面提取失败: ${errorMsg}`)
+    console.error('抽帧错误详情:', error)
+  } finally {
+    extractingFrame.value = false
+  }
+}
+
+async function handleUploadThumbnail() {
+  if (!editingVideo.value) return
+
+  try {
+    const filePath = await selectImageFile()
+    if (!filePath) return
+
+    uploadingThumbnail.value = true
+    const result = await uploadThumbnail(editingVideo.value.id, filePath)
+    editForm.value.thumbnail = result.thumbnailPath
+    ElMessage.success('封面上传成功')
+  } catch (error) {
+    ElMessage.error('封面上传失败')
+  } finally {
+    uploadingThumbnail.value = false
+  }
+}
+
+async function handleClearThumbnail() {
+  if (!editingVideo.value) return
+
+  try {
+    await clearThumbnail(editingVideo.value.id)
+    editForm.value.thumbnail = ''
+    ElMessage.success('封面已清除')
+  } catch (error) {
+    ElMessage.error('清除封面失败')
+  }
+}
+
+function formatTime(seconds: number): string {
+  const mins = Math.floor(seconds / 60)
+  const secs = Math.floor(seconds % 60)
+  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
 }
 
 onMounted(() => {
@@ -170,9 +242,83 @@ onMounted(() => {
     <el-dialog
       v-model="showEditDialog"
       title="编辑视频信息"
-      width="500px"
+      width="560px"
     >
       <el-form label-position="top">
+        <!-- 封面编辑区域 -->
+        <el-form-item label="视频封面">
+          <div class="cover-edit-section">
+            <div class="cover-preview">
+              <img
+                v-if="editForm.thumbnail"
+                :src="editForm.thumbnail"
+                class="cover-image"
+                alt="视频封面"
+              >
+              <div v-else class="cover-placeholder">
+                <el-icon :size="40"><Picture /></el-icon>
+                <span>暂无封面</span>
+              </div>
+            </div>
+
+            <div class="cover-actions">
+              <el-button
+                type="primary"
+                size="small"
+                :loading="extractingFrame"
+                @click="toggleTimeSlider"
+              >
+                <el-icon><VideoPlay /></el-icon>
+                从视频提取
+              </el-button>
+              <el-button
+                type="primary"
+                size="small"
+                plain
+                :loading="uploadingThumbnail"
+                @click="handleUploadThumbnail"
+              >
+                <el-icon><Upload /></el-icon>
+                上传图片
+              </el-button>
+              <el-button
+                v-if="editForm.thumbnail"
+                type="danger"
+                size="small"
+                plain
+                @click="handleClearThumbnail"
+              >
+                <el-icon><Delete /></el-icon>
+                清除封面
+              </el-button>
+            </div>
+
+            <!-- 时间选择滑块 -->
+            <div v-if="showTimeSlider" class="time-slider-section">
+              <div class="time-display">
+                <span>选择时间点: {{ formatTime(frameTime) }}</span>
+              </div>
+              <el-slider
+                v-model="frameTime"
+                :max="maxFrameTime"
+                :step="1"
+                show-stops
+              />
+              <div class="slider-actions">
+                <el-button size="small" @click="showTimeSlider = false">取消</el-button>
+                <el-button
+                  type="primary"
+                  size="small"
+                  :loading="extractingFrame"
+                  @click="handleExtractFrame"
+                >
+                  提取封面
+                </el-button>
+              </div>
+            </div>
+          </div>
+        </el-form-item>
+
         <el-form-item label="视频标题">
           <el-input
             v-model="editForm.title"
@@ -181,7 +327,7 @@ onMounted(() => {
             show-word-limit
           />
         </el-form-item>
-        
+
         <el-form-item label="视频描述">
           <el-input
             v-model="editForm.description"
@@ -192,7 +338,7 @@ onMounted(() => {
             show-word-limit
           />
         </el-form-item>
-        
+
         <el-form-item label="标签">
           <div class="tags-input">
             <el-tag
@@ -212,7 +358,7 @@ onMounted(() => {
           </div>
         </el-form-item>
       </el-form>
-      
+
       <template #footer>
         <el-button @click="showEditDialog = false">取消</el-button>
         <el-button type="primary" @click="handleSaveEdit">保存</el-button>
@@ -351,5 +497,69 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: var(--spacing-xs);
   align-items: center;
+}
+
+/* 封面编辑区域样式 */
+.cover-edit-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.cover-preview {
+  width: 100%;
+  aspect-ratio: 16/9;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+}
+
+.cover-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.cover-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  gap: var(--spacing-xs);
+}
+
+.cover-placeholder span {
+  font-size: 12px;
+}
+
+.cover-actions {
+  display: flex;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
+.time-slider-section {
+  background: var(--bg-secondary);
+  padding: var(--spacing-md);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+}
+
+.time-display {
+  font-size: 14px;
+  color: var(--text-primary);
+  margin-bottom: var(--spacing-sm);
+  font-weight: 500;
+}
+
+.slider-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-sm);
 }
 </style>

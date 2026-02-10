@@ -28,30 +28,27 @@ type UploadService struct {
 	rateLimiter *ratelimit.LimiterWithStats
 }
 
+// EventHandler 事件处理器函数类型
+type EventHandler func(event types.Event)
+
 type EventBus struct {
-	handlers map[string][]func(interface{})
+	handlers map[string][]EventHandler
 }
 
-// UploadTaskMetadata 上传任务元数据
-type UploadTaskMetadata struct {
-	Common struct {
-		Title       string `json:"title"`
-		Description string `json:"description"`
-	} `json:"common"`
-	Platforms map[string]map[string]interface{} `json:"platforms"`
-}
+// UploadTaskMetadata 上传任务元数据（使用types包中的定义）
+type UploadTaskMetadata = types.UploadTaskMetadata
 
 func NewEventBus() *EventBus {
 	return &EventBus{
-		handlers: make(map[string][]func(interface{})),
+		handlers: make(map[string][]EventHandler),
 	}
 }
 
-func (eb *EventBus) Subscribe(event string, handler func(interface{})) {
+func (eb *EventBus) Subscribe(event string, handler EventHandler) {
 	eb.handlers[event] = append(eb.handlers[event], handler)
 }
 
-func (eb *EventBus) Publish(event string, data interface{}) {
+func (eb *EventBus) Publish(event string, data types.Event) {
 	for _, handler := range eb.handlers[event] {
 		go handler(data)
 	}
@@ -115,16 +112,12 @@ func (s *UploadService) CreateUploadTask(ctx context.Context, videoID int, accou
 			continue
 		}
 
-		status := config.TaskStatusPending
-		if scheduleTime == nil {
-			status = config.TaskStatusUploading
-		}
-
+		// 无论是否有定时时间，都立即执行任务（由平台处理定时发布）
 		task := database.UploadTask{
 			VideoID:      videoID,
 			AccountID:    accountID,
 			Platform:     account.Platform,
-			Status:       status,
+			Status:       config.TaskStatusUploading,
 			Progress:     0,
 			ScheduleTime: scheduleTime,
 		}
@@ -150,46 +143,35 @@ func (s *UploadService) CreateUploadTask(ctx context.Context, videoID int, accou
 
 		tasks = append(tasks, task)
 
-		if scheduleTime == nil {
-			go s.executeTask(context.Background(), task.ID)
-		}
+		// 立即执行上传任务（平台会处理定时发布逻辑）
+		go s.executeTask(context.Background(), task.ID)
 	}
 
 	return tasks, nil
 }
 
 // applyPlatformFields 应用平台特定字段到任务
-func (s *UploadService) applyPlatformFields(task *database.UploadTask, fields map[string]interface{}) {
-	if title, ok := fields["title"].(string); ok {
-		task.Title = title
+func (s *UploadService) applyPlatformFields(task *database.UploadTask, fields types.PlatformFields) {
+	if fields.Title != "" {
+		task.Title = fields.Title
 	}
-	if collection, ok := fields["collection"].(string); ok {
-		task.Collection = collection
+	if fields.Collection != "" {
+		task.Collection = fields.Collection
 	}
-	if shortTitle, ok := fields["shortTitle"].(string); ok {
-		task.ShortTitle = shortTitle
+	if fields.ShortTitle != "" {
+		task.ShortTitle = fields.ShortTitle
 	}
-	if isOriginal, ok := fields["isOriginal"].(bool); ok {
-		task.IsOriginal = isOriginal
+	task.IsOriginal = fields.IsOriginal
+	task.OriginalType = fields.OriginalType
+	if fields.Location != "" {
+		task.Location = fields.Location
 	}
-	if originalType, ok := fields["originalType"].(string); ok {
-		task.OriginalType = originalType
+	if fields.Thumbnail != "" {
+		task.Thumbnail = fields.Thumbnail
 	}
-	if location, ok := fields["location"].(string); ok {
-		task.Location = location
-	}
-	if thumbnail, ok := fields["thumbnail"].(string); ok {
-		task.Thumbnail = thumbnail
-	}
-	if syncToutiao, ok := fields["syncToutiao"].(bool); ok {
-		task.SyncToutiao = syncToutiao
-	}
-	if syncXigua, ok := fields["syncXigua"].(bool); ok {
-		task.SyncXigua = syncXigua
-	}
-	if isDraft, ok := fields["isDraft"].(bool); ok {
-		task.IsDraft = isDraft
-	}
+	task.SyncToutiao = fields.SyncToutiao
+	task.SyncXigua = fields.SyncXigua
+	task.IsDraft = fields.IsDraft
 }
 
 func (s *UploadService) GetUploadTasks(ctx context.Context, status string) ([]database.UploadTask, error) {
@@ -316,13 +298,19 @@ func (s *UploadService) executeTask(ctx context.Context, taskID int) {
 		}
 	}
 
+	// 封面优先级：发布页面设置的封面 > 视频默认封面
+	thumbnail := task.Thumbnail
+	if thumbnail == "" {
+		thumbnail = task.Video.Thumbnail
+	}
+
 	videoTask := &types.VideoTask{
 		Platform:     task.Platform,
 		VideoPath:    task.Video.FilePath,
 		Title:        title,
 		Description:  task.Video.Description,
 		Tags:         task.Video.Tags,
-		Thumbnail:    task.Thumbnail,
+		Thumbnail:    thumbnail,
 		ScheduleTime: task.ScheduleTime,
 		IsDraft:      task.IsDraft,
 		Location:     task.Location,

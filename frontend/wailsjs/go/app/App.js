@@ -30,6 +30,10 @@ export function CleanOldScreenshots() {
   return window['go']['app']['App']['CleanOldScreenshots']();
 }
 
+export function ClearThumbnail(arg1) {
+  return window['go']['app']['App']['ClearThumbnail'](arg1);
+}
+
 export function CreateUploadTask(arg1, arg2, arg3, arg4) {
   return window['go']['app']['App']['CreateUploadTask'](arg1, arg2, arg3, arg4);
 }
@@ -58,6 +62,10 @@ export function ExecuteTask(arg1) {
   return window['go']['app']['App']['ExecuteTask'](arg1);
 }
 
+export function ExtractVideoFrame(arg1, arg2) {
+  return window['go']['app']['App']['ExtractVideoFrame'](arg1, arg2);
+}
+
 export function GenerateScheduleTimes(arg1) {
   return window['go']['app']['App']['GenerateScheduleTimes'](arg1);
 }
@@ -76,6 +84,14 @@ export function GetAppVersion() {
 
 export function GetCollections(arg1) {
   return window['go']['app']['App']['GetCollections'](arg1);
+}
+
+export function GetHeadlessConfig() {
+  return window['go']['app']['App']['GetHeadlessConfig']();
+}
+
+export function GetLogPlatforms() {
+  return window['go']['app']['App']['GetLogPlatforms']();
 }
 
 export function GetLogs(arg1) {
@@ -106,6 +122,10 @@ export function GetVideos() {
   return window['go']['app']['App']['GetVideos']();
 }
 
+export function IsLogDedupEnabled() {
+  return window['go']['app']['App']['IsLogDedupEnabled']();
+}
+
 export function LoginAccount(arg1) {
   return window['go']['app']['App']['LoginAccount'](arg1);
 }
@@ -116,6 +136,10 @@ export function OpenDirectory(arg1) {
 
 export function OpenScreenshotDir(arg1) {
   return window['go']['app']['App']['OpenScreenshotDir'](arg1);
+}
+
+export function ReloginAccount(arg1) {
+  return window['go']['app']['App']['ReloginAccount'](arg1);
 }
 
 export function RetryUploadTask(arg1) {
@@ -134,6 +158,14 @@ export function SelectVideoFile() {
   return window['go']['app']['App']['SelectVideoFile']();
 }
 
+export function SetHeadlessConfig(arg1) {
+  return window['go']['app']['App']['SetHeadlessConfig'](arg1);
+}
+
+export function SetLogDedupEnabled(arg1) {
+  return window['go']['app']['App']['SetLogDedupEnabled'](arg1);
+}
+
 export function UpdateAccount(arg1) {
   return window['go']['app']['App']['UpdateAccount'](arg1);
 }
@@ -148,6 +180,10 @@ export function UpdateScreenshotConfig(arg1) {
 
 export function UpdateVideo(arg1) {
   return window['go']['app']['App']['UpdateVideo'](arg1);
+}
+
+export function UploadThumbnail(arg1, arg2) {
+  return window['go']['app']['App']['UploadThumbnail'](arg1, arg2);
 }
 
 export function ValidateAccount(arg1) {

@@ -27,16 +27,16 @@ var DefaultPoolConfig = PoolConfig{
 }
 
 var (
-	config     *PoolConfig
-	configOnce sync.Once
-	configPath string
+	poolConfig     *PoolConfig
+	configOnce     sync.Once
+	configPath     string
 )
 
 // LoadPoolConfig 加载浏览器池配置
 func LoadPoolConfig() *PoolConfig {
 	configOnce.Do(func() {
-		config = &PoolConfig{}
-		*config = DefaultPoolConfig
+		poolConfig = &PoolConfig{}
+		*poolConfig = DefaultPoolConfig
 
 		// 尝试从配置文件加载
 		if configPath == "" {
@@ -46,18 +46,18 @@ func LoadPoolConfig() *PoolConfig {
 		if _, err := os.Stat(configPath); err == nil {
 			data, err := os.ReadFile(configPath)
 			if err == nil {
-				if err := json.Unmarshal(data, config); err != nil {
+				if err := json.Unmarshal(data, poolConfig); err != nil {
 					fmt.Printf("[-] 解析浏览器池配置失败，使用默认配置: %v\n", err)
-					*config = DefaultPoolConfig
+					*poolConfig = DefaultPoolConfig
 				}
 			}
 		} else {
 			// 配置文件不存在，创建默认配置
-			SavePoolConfig(config)
+			SavePoolConfig(poolConfig)
 		}
 	})
 
-	return config
+	return poolConfig
 }
 
 // SavePoolConfig 保存浏览器池配置
@@ -81,7 +81,7 @@ func SavePoolConfig(cfg *PoolConfig) error {
 		return fmt.Errorf("写入配置文件失败: %w", err)
 	}
 
-	config = cfg
+	poolConfig = cfg
 	return nil
 }
 

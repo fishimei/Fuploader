@@ -1,96 +1,106 @@
 package bilibili
 
-// PreUpInfo 预上传返回信息
-type PreUpInfo struct {
-	OK              int64       `json:"OK"`
-	Auth            string      `json:"auth"`
-	BizId           int64       `json:"biz_id"`
-	ChunkRetry      int64       `json:"chunk_retry"`
-	ChunkRetryDelay int64       `json:"chunk_retry_delay"`
-	ChunkSize       int64       `json:"chunk_size"`
-	Endpoint        string      `json:"endpoint"`
-	Endpoints       []string    `json:"endpoints"`
-	ExposeParams    interface{} `json:"expose_params"`
-	PutQuery        string      `json:"put_query"`
-	Threads         int64       `json:"threads"`
-	Timeout         int64       `json:"timeout"`
-	Uip             string      `json:"uip"`
-	UposUri         string      `json:"upos_uri"`
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+
+	"Fuploader/internal/utils"
+
+	"github.com/imroc/req/v3"
+	"github.com/tidwall/gjson"
+)
+
+// PlaywrightCookie Playwright的cookie格式
+type PlaywrightCookie struct {
+	Name     string  `json:"name"`
+	Value    string  `json:"value"`
+	Domain   string  `json:"domain"`
+	Path     string  `json:"path"`
+	Expires  float64 `json:"expires"`
+	HttpOnly bool    `json:"httpOnly"`
+	Secure   bool    `json:"secure"`
+	SameSite string  `json:"sameSite"`
 }
 
-// UpInfo 上传返回信息
-type UpInfo struct {
-	Location string `json:"location"`
-	Etag     string `json:"etag"`
-	OK       int64  `json:"OK"`
-	Bucket   string `json:"bucket"`
-	Key      string `json:"key"`
-	UploadId string `json:"upload_id"`
+// PlaywrightStorageState Playwright StorageState格式
+type PlaywrightStorageState struct {
+	Cookies []PlaywrightCookie `json:"cookies"`
+	Origins []struct {
+		Origin       string `json:"origin"`
+		LocalStorage []struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		} `json:"localStorage"`
+	} `json:"origins"`
 }
 
-// ReqJson 分片确认请求
-type ReqJson struct {
-	Parts []Part `json:"parts"`
+// convertPlaywrightCookies 转换Playwright cookie格式为字符串
+func convertPlaywrightCookies(cookies []PlaywrightCookie) string {
+	var parts []string
+	for _, c := range cookies {
+		parts = append(parts, fmt.Sprintf("%s=%s", c.Name, c.Value))
+	}
+	return strings.Join(parts, "; ")
 }
 
-// Part 分片信息
-type Part struct {
-	PartNumber int64  `json:"partNumber"`
-	ETag       string `json:"eTag"`
+// ValidateCookie 验证Cookie是否有效
+func ValidateCookie(cookiePath string) (bool, string, error) {
+	utils.Info(fmt.Sprintf("[-] B站验证 - 开始验证，cookie路径: %s", cookiePath))
+
+	loginInfo, err := os.ReadFile(cookiePath)
+	if err != nil || len(loginInfo) == 0 {
+		utils.Error(fmt.Sprintf("[-] B站验证 - 读取cookie文件失败: %v", err))
+		return false, "", fmt.Errorf("cookie文件不存在")
+	}
+
+	utils.Info(fmt.Sprintf("[-] B站验证 - 读取到cookie文件，大小: %d 字节", len(loginInfo)))
+
+	// 解析Playwright StorageState格式
+	var storageState PlaywrightStorageState
+	if err := json.Unmarshal(loginInfo, &storageState); err != nil {
+		utils.Error(fmt.Sprintf("[-] B站验证 - 解析cookie文件失败: %v", err))
+		return false, "", fmt.Errorf("解析cookie文件失败: %w", err)
+	}
+
+	if len(storageState.Cookies) == 0 {
+		utils.Error("[-] B站验证 - cookie文件中没有cookies")
+		return false, "", fmt.Errorf("cookie文件中没有cookies")
+	}
+
+	utils.Info(fmt.Sprintf("[-] B站验证 - 共 %d 个cookie", len(storageState.Cookies)))
+	cookie := convertPlaywrightCookies(storageState.Cookies)
+	utils.Info(fmt.Sprintf("[-] B站验证 - 转换后的cookie字符串长度: %d", len(cookie)))
+
+	return validateCookieString(cookie)
 }
 
-// AddReqJson 提交视频请求
-type AddReqJson struct {
-	Copyright        int64    `json:"copyright"` // 1:原创 2:转载
-	Cover            string   `json:"cover"`     // 封面url
-	Title            string   `json:"title"`     // 视频标题
-	Tid              int64    `json:"tid"`       // 分区id
-	Tag              string   `json:"tag"`       // 标签 , 分割
-	DescFormatId     int64    `json:"desc_format_id"`
-	Desc             string   `json:"desc"`             // 简介
-	Source           string   `json:"source,omitempty"` // 来源
-	Dynamic          string   `json:"dynamic"`
-	Interactive      int64    `json:"interactive"`
-	Videos           []Video  `json:"videos"`
-	ActReserveCreate int64    `json:"act_reserve_create"`
-	NoDisturbance    int64    `json:"no_disturbance"`
-	NoReprint        int64    `json:"no_reprint"`
-	Subtitle         Subtitle `json:"subtitle"`
-	Dolby            int64    `json:"dolby"`
-	LosslessMusic    int64    `json:"lossless_music"`
-	Csrf             string   `json:"csrf"`
-}
+// validateCookieString 验证cookie字符串
+func validateCookieString(cookie string) (bool, string, error) {
+	utils.Info("[-] B站验证 - 开始请求API验证cookie")
 
-// Video 视频信息
-type Video struct {
-	Filename string `json:"filename"`
-	Title    string `json:"title"`
-	Desc     string `json:"desc"`
-}
+	client := req.C().SetCommonHeaders(map[string]string{
+		"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"cookie":     cookie,
+		"Referer":    "https://www.bilibili.com",
+	})
 
-// Subtitle 字幕信息
-type Subtitle struct {
-	Open int64  `json:"open"`
-	Lan  string `json:"lan"`
-}
+	resp, err := client.R().Get("https://api.bilibili.com/x/web-interface/nav")
+	if err != nil {
+		utils.Error(fmt.Sprintf("[-] B站验证 - API请求失败: %v", err))
+		return false, "", err
+	}
 
-// CoverInfo 封面上传返回信息
-type CoverInfo struct {
-	Code    int64  `json:"code"`
-	Message string `json:"message"`
-	Ttl     int64  `json:"ttl"`
-	Data    struct {
-		Url string `json:"url"`
-	} `json:"data"`
-}
+	respBody := resp.Bytes()
+	utils.Info(fmt.Sprintf("[-] B站验证 - API响应: %s", string(respBody)))
 
-// UserInfo 用户信息
-type UserInfo struct {
-	Code    int64  `json:"code"`
-	Message string `json:"message"`
-	Data    struct {
-		IsLogin bool   `json:"isLogin"`
-		Uname   string `json:"uname"`
-		Mid     int64  `json:"mid"`
-	} `json:"data"`
+	isLogin := gjson.GetBytes(respBody, "data.isLogin").Bool()
+	uname := gjson.GetBytes(respBody, "data.uname").String()
+	code := gjson.GetBytes(respBody, "code").Int()
+	message := gjson.GetBytes(respBody, "message").String()
+
+	utils.Info(fmt.Sprintf("[-] B站验证 - 解析结果: code=%d, message=%s, isLogin=%v, uname=%s", code, message, isLogin, uname))
+
+	return isLogin, uname, nil
 }

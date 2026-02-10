@@ -1,9 +1,0 @@
-*.mp4
-*.jpg
-*.png
-*.json
-*.exe
-.idea
-biliup-go
-
-dist/

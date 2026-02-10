@@ -2,6 +2,7 @@ package types
 
 import "context"
 
+// VideoTask 视频任务
 type VideoTask struct {
 	Platform     string // 平台名称
 	VideoPath    string
@@ -22,9 +23,36 @@ type VideoTask struct {
 	ProductTitle string // 商品短标题（抖音）
 }
 
+// Uploader 上传器接口
 type Uploader interface {
 	ValidateCookie(ctx context.Context) (bool, error)
 	Upload(ctx context.Context, task *VideoTask) error
 	Login() error
 	Platform() string
+}
+
+// PlatformFields 平台特定字段
+type PlatformFields struct {
+	Title        string `json:"title"`
+	Collection   string `json:"collection"`
+	ShortTitle   string `json:"shortTitle"`
+	IsOriginal   bool   `json:"isOriginal"`
+	OriginalType string `json:"originalType"`
+	Location     string `json:"location"`
+	Thumbnail    string `json:"thumbnail"`
+	SyncToutiao  bool   `json:"syncToutiao"`
+	SyncXigua    bool   `json:"syncXigua"`
+	IsDraft      bool   `json:"isDraft"`
+}
+
+// CommonMetadata 通用元数据
+type CommonMetadata struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+}
+
+// UploadTaskMetadata 上传任务元数据
+type UploadTaskMetadata struct {
+	Common    CommonMetadata            `json:"common"`
+	Platforms map[string]PlatformFields `json:"platforms"`
 }

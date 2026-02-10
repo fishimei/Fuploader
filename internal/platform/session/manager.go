@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"Fuploader/internal/types"
 	"Fuploader/internal/utils"
 )
 
@@ -267,7 +268,7 @@ func (m *Manager) ClearCache() {
 }
 
 // GetCacheStats 获取缓存统计
-func (m *Manager) GetCacheStats() map[string]interface{} {
+func (m *Manager) GetCacheStats() *types.CacheStats {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 
@@ -283,9 +284,9 @@ func (m *Manager) GetCacheStats() map[string]interface{} {
 		}
 	}
 
-	return map[string]interface{}{
-		"total":   len(m.cache),
-		"valid":   validCount,
-		"expired": expiredCount,
+	return &types.CacheStats{
+		Total:   len(m.cache),
+		Valid:   validCount,
+		Expired: expiredCount,
 	}
 }

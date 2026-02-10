@@ -82,6 +82,15 @@ export const useAccountStore = defineStore('account', () => {
     }
   }
 
+  async function reloginAccount(id: number) {
+    loading.value = true
+    try {
+      await accountApi.reloginAccount(id)
+    } finally {
+      loading.value = false
+    }
+  }
+
   async function updateAccount(account: Account) {
     loading.value = true
     try {
@@ -115,6 +124,7 @@ export const useAccountStore = defineStore('account', () => {
     deleteAccount,
     validateAccount,
     loginAccount,
+    reloginAccount,
     updateAccount,
     updateAccountStatus
   }

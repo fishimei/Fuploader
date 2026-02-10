@@ -126,6 +126,32 @@ async function handleLoginAccount(account: Account) {
   }
 }
 
+async function handleReloginAccount(account: Account) {
+  // 确认重新登录
+  try {
+    await ElMessageBox.confirm(
+      '确定要重新登录吗？这将清除当前登录状态，需要重新扫码。',
+      '确认重新登录',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+  } catch {
+    return // 用户取消
+  }
+
+  loggingIn.value = account.id
+  try {
+    await accountStore.reloginAccount(account.id)
+    ElMessage.info('请在新打开的浏览器窗口中完成登录')
+  } catch (error) {
+    ElMessage.error('重新登录失败')
+    loggingIn.value = null
+  }
+}
+
 // 打开截图管理抽屉
 async function openScreenshotDrawer(account: Account) {
   currentAccount.value = account
@@ -343,7 +369,17 @@ onMounted(() => {
             <el-icon><Key /></el-icon>
             登录
           </el-button>
-          
+          <el-button
+            v-else
+            type="warning"
+            size="small"
+            :loading="loggingIn === account.id"
+            @click="handleReloginAccount(account)"
+          >
+            <el-icon><Refresh /></el-icon>
+            重新登录
+          </el-button>
+
           <el-button
             type="default"
             size="small"
@@ -353,7 +389,7 @@ onMounted(() => {
             <el-icon><CircleCheck /></el-icon>
             验证
           </el-button>
-          
+
           <el-button
             type="danger"
             size="small"

@@ -4,6 +4,7 @@ import {
   DeleteAccount,
   ValidateAccount,
   LoginAccount,
+  ReloginAccount,
   UpdateAccount
 } from '../../wailsjs/go/app/App'
 import type { Account } from '../types'
@@ -57,6 +58,16 @@ export async function loginAccount(id: number): Promise<void> {
     await LoginAccount(id)
   } catch (error) {
     console.error('登录账号失败:', error)
+    throw error
+  }
+}
+
+// 重新登录账号
+export async function reloginAccount(id: number): Promise<void> {
+  try {
+    await ReloginAccount(id)
+  } catch (error) {
+    console.error('重新登录账号失败:', error)
     throw error
   }
 }

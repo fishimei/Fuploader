@@ -192,8 +192,8 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   // 选择图片文件
-  async function selectImageFile() {
-    return await platformApi.selectImageFile()
+  async function selectImageFile(videoId?: number) {
+    return await platformApi.selectImageFile(videoId)
   }
 
   // 选择文件
