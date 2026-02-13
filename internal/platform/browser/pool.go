@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"Fuploader/internal/config"
-	"Fuploader/internal/platform/platformutils"
 	"Fuploader/internal/utils"
 
 	"github.com/playwright-community/playwright-go"
@@ -813,10 +812,10 @@ func (b *PooledBrowser) createContextWithPlatform(accountID uint, platform strin
 		return nil, fmt.Errorf("create context failed: %w", err)
 	}
 
-	// 注入反检测脚本
-	if err := platformutils.InjectStealthScript(context); err != nil {
-		return nil, fmt.Errorf("inject stealth script failed: %w", err)
-	}
+	// [已禁用] 注入反检测脚本
+	// if err := platformutils.InjectStealthScript(context); err != nil {
+	// 	return nil, fmt.Errorf("inject stealth script failed: %w", err)
+	// }
 
 	ctx := &PooledContext{
 		context:    context,
@@ -1206,196 +1205,203 @@ func (c *PooledContext) GetCookieValues(domain string, names []string) (map[stri
 	return checker.GetCookieValues(c.page, domain, names)
 }
 
-// ==================== 反爬检测方法 ====================
+// ==================== 反爬检测方法（已禁用，降为可选项） ====================
 
 // DetectCaptcha 检测是否出现验证码/滑块
-func (c *PooledContext) DetectCaptcha() (bool, string, error) {
-	if c.page == nil {
-		return false, "", fmt.Errorf("page not created")
-	}
-
-	captchaSelectors := []struct {
-		selector string
-		type_    string
-	}{
-		{".captcha", "验证码"},
-		{"[class*='captcha']", "验证码"},
-		{"[class*='slider']", "滑块验证"},
-		{"[class*='verify']", "验证"},
-		{".geetest", "极验验证"},
-		{"[class*='geetest']", "极验验证"},
-		{"iframe[src*='captcha']", "验证码iframe"},
-		{"iframe[src*='verify']", "验证iframe"},
-		{"text=请完成验证", "文字验证"},
-		{"text=拖动滑块", "滑块验证"},
-		{"text=点击验证", "点击验证"},
-	}
-
-	for _, item := range captchaSelectors {
-		count, err := c.page.Locator(item.selector).Count()
-		if err == nil && count > 0 {
-			visible, _ := c.page.Locator(item.selector).IsVisible()
-			if visible {
-				utils.Warn(fmt.Sprintf("[-] 检测到%s", item.type_))
-				return true, item.type_, nil
-			}
-		}
-	}
-
-	verificationTexts := []string{
-		"请完成安全验证",
-		"请进行验证",
-		"验证失败",
-		"请点击",
-		"请拖动",
-	}
-
-	for _, text := range verificationTexts {
-		count, _ := c.page.GetByText(text).Count()
-		if count > 0 {
-			return true, "验证提示", nil
-		}
-	}
-
-	return false, "", nil
-}
+// [已禁用] 高耗时检测（1-3秒），降为可选项
+// func (c *PooledContext) DetectCaptcha() (bool, string, error) {
+// 	if c.page == nil {
+// 		return false, "", fmt.Errorf("page not created")
+// 	}
+//
+// 	captchaSelectors := []struct {
+// 		selector string
+// 		type_    string
+// 	}{
+// 		{".captcha", "验证码"},
+// 		{"[class*='captcha']", "验证码"},
+// 		{"[class*='slider']", "滑块验证"},
+// 		{"[class*='verify']", "验证"},
+// 		{".geetest", "极验验证"},
+// 		{"[class*='geetest']", "极验验证"},
+// 		{"iframe[src*='captcha']", "验证码iframe"},
+// 		{"iframe[src*='verify']", "验证iframe"},
+// 		{"text=请完成验证", "文字验证"},
+// 		{"text=拖动滑块", "滑块验证"},
+// 		{"text=点击验证", "点击验证"},
+// 	}
+//
+// 	for _, item := range captchaSelectors {
+// 		count, err := c.page.Locator(item.selector).Count()
+// 		if err == nil && count > 0 {
+// 			visible, _ := c.page.Locator(item.selector).IsVisible()
+// 			if visible {
+// 				utils.Warn(fmt.Sprintf("[-] 检测到%s", item.type_))
+// 				return true, item.type_, nil
+// 			}
+// 		}
+// 	}
+//
+// 	verificationTexts := []string{
+// 		"请完成安全验证",
+// 		"请进行验证",
+// 		"验证失败",
+// 		"请点击",
+// 		"请拖动",
+// 	}
+//
+// 	for _, text := range verificationTexts {
+// 		count, _ := c.page.GetByText(text).Count()
+// 		if count > 0 {
+// 			return true, "验证提示", nil
+// 		}
+// 	}
+//
+// 	return false, "", nil
+// }
 
 // DetectAntiBot 检测反爬虫标记
-func (c *PooledContext) DetectAntiBot() (bool, string, error) {
-	if c.page == nil {
-		return false, "", fmt.Errorf("page not created")
-	}
+// [已禁用] 高耗时检测（1-2秒），降为可选项
+// func (c *PooledContext) DetectAntiBot() (bool, string, error) {
+// 	if c.page == nil {
+// 		return false, "", fmt.Errorf("page not created")
+// 	}
+//
+// 	antiBotIndicators := []struct {
+// 		selector string
+// 		message  string
+// 	}{
+// 		{"text=访问过于频繁", "访问频繁"},
+// 		{"text=操作过于频繁", "操作频繁"},
+// 		{"text=请稍后再试", "限流提示"},
+// 		{"text=系统繁忙", "系统繁忙"},
+// 		{"text=网络异常", "网络异常"},
+// 		{"text=账号异常", "账号异常"},
+// 		{"text=登录异常", "登录异常"},
+// 		{"text=自动程序", "自动程序检测"},
+// 		{"text=机器人", "机器人检测"},
+// 		{"[class*='ban']", "封禁提示"},
+// 		{"[class*='block']", "拦截提示"},
+// 	}
+//
+// 	for _, item := range antiBotIndicators {
+// 		count, err := c.page.Locator(item.selector).Count()
+// 		if err == nil && count > 0 {
+// 			visible, _ := c.page.Locator(item.selector).IsVisible()
+// 			if visible {
+// 				utils.Warn(fmt.Sprintf("[-] 检测到反爬标记: %s", item.message))
+// 				return true, item.message, nil
+// 			}
+// 		}
+// 	}
+//
+// 	return false, "", nil
+// }
 
-	antiBotIndicators := []struct {
-		selector string
-		message  string
-	}{
-		{"text=访问过于频繁", "访问频繁"},
-		{"text=操作过于频繁", "操作频繁"},
-		{"text=请稍后再试", "限流提示"},
-		{"text=系统繁忙", "系统繁忙"},
-		{"text=网络异常", "网络异常"},
-		{"text=账号异常", "账号异常"},
-		{"text=登录异常", "登录异常"},
-		{"text=自动程序", "自动程序检测"},
-		{"text=机器人", "机器人检测"},
-		{"[class*='ban']", "封禁提示"},
-		{"[class*='block']", "拦截提示"},
-	}
-
-	for _, item := range antiBotIndicators {
-		count, err := c.page.Locator(item.selector).Count()
-		if err == nil && count > 0 {
-			visible, _ := c.page.Locator(item.selector).IsVisible()
-			if visible {
-				utils.Warn(fmt.Sprintf("[-] 检测到反爬标记: %s", item.message))
-				return true, item.message, nil
-			}
-		}
-	}
-
-	return false, "", nil
-}
-
-// ==================== 人类行为模拟方法 ====================
+// ==================== 人类行为模拟方法（已禁用，降为可选项） ====================
 
 // HumanLikeDelay 模拟人类操作的随机延迟
-func (c *PooledContext) HumanLikeDelay(baseDelay time.Duration) {
-	variance := float64(baseDelay) * 0.3
-	delay := baseDelay + time.Duration(rand.Float64()*variance*2-variance)
-	time.Sleep(delay)
-}
+// [已禁用] 中等耗时（可配置），降为可选项
+// func (c *PooledContext) HumanLikeDelay(baseDelay time.Duration) {
+// 	variance := float64(baseDelay) * 0.3
+// 	delay := baseDelay + time.Duration(rand.Float64()*variance*2-variance)
+// 	time.Sleep(delay)
+// }
 
 // HumanLikeTyping 模拟人类输入（带随机延迟）
-func (c *PooledContext) HumanLikeTyping(text string) error {
-	if c.page == nil {
-		return fmt.Errorf("page not created")
-	}
-
-	for _, char := range text {
-		if err := c.page.Keyboard().Type(string(char)); err != nil {
-			return err
-		}
-		time.Sleep(time.Duration(50+rand.Intn(100)) * time.Millisecond)
-	}
-	return nil
-}
+// [已禁用] 高耗时（每字符50-150ms），降为可选项
+// func (c *PooledContext) HumanLikeTyping(text string) error {
+// 	if c.page == nil {
+// 		return fmt.Errorf("page not created")
+// 	}
+//
+// 	for _, char := range text {
+// 		if err := c.page.Keyboard().Type(string(char)); err != nil {
+// 			return err
+// 		}
+// 		time.Sleep(time.Duration(50+rand.Intn(100)) * time.Millisecond)
+// 	}
+// 	return nil
+// }
 
 // SimulateHumanBehavior 模拟人类浏览行为
-func (c *PooledContext) SimulateHumanBehavior() error {
-	if c.page == nil {
-		return fmt.Errorf("page not created")
-	}
+// [已禁用] 高耗时（1.5-3秒），降为可选项
+// func (c *PooledContext) SimulateHumanBehavior() error {
+// 	if c.page == nil {
+// 		return fmt.Errorf("page not created")
+// 	}
+//
+// 	// 随机滚动
+// 	scrollCount := 2 + rand.Intn(3)
+// 	for i := 0; i < scrollCount; i++ {
+// 		scrollY := rand.Intn(300) + 100
+// 		_, err := c.page.Evaluate(fmt.Sprintf("window.scrollBy(0, %d)", scrollY))
+// 		if err != nil {
+// 			return err
+// 		}
+// 		time.Sleep(time.Duration(500+rand.Intn(500)) * time.Millisecond)
+// 	}
+//
+// 	// 随机鼠标移动
+// 	err := c.page.Mouse().Move(float64(rand.Intn(500)+100), float64(rand.Intn(300)+100))
+// 	if err != nil {
+// 		return err
+// 	}
+//
+// 	return nil
+// }
 
-	// 随机滚动
-	scrollCount := 2 + rand.Intn(3)
-	for i := 0; i < scrollCount; i++ {
-		scrollY := rand.Intn(300) + 100
-		_, err := c.page.Evaluate(fmt.Sprintf("window.scrollBy(0, %d)", scrollY))
-		if err != nil {
-			return err
-		}
-		time.Sleep(time.Duration(500+rand.Intn(500)) * time.Millisecond)
-	}
-
-	// 随机鼠标移动
-	err := c.page.Mouse().Move(float64(rand.Intn(500)+100), float64(rand.Intn(300)+100))
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// SafeGoto 安全导航（带反爬检测）
+// SafeGoto 安全导航（已简化，移除高耗时检测）
 func (c *PooledContext) SafeGoto(url string, options ...playwright.PageGotoOptions) error {
 	if c.page == nil {
 		return fmt.Errorf("page not created")
 	}
 
-	// 模拟人类行为前等待
-	c.HumanLikeDelay(500 * time.Millisecond)
+	// [已禁用] 模拟人类行为前等待
+	// c.HumanLikeDelay(500 * time.Millisecond)
 
 	_, err := c.page.Goto(url, options...)
 	if err != nil {
 		return err
 	}
 
-	// 页面加载后模拟人类行为
-	if err := c.SimulateHumanBehavior(); err != nil {
-		utils.Warn(fmt.Sprintf("[-] 模拟人类行为失败: %v", err))
-	}
+	// [已禁用] 页面加载后模拟人类行为
+	// if err := c.SimulateHumanBehavior(); err != nil {
+	// 	utils.Warn(fmt.Sprintf("[-] 模拟人类行为失败: %v", err))
+	// }
 
-	// 检测验证码
-	if detected, captchaType, _ := c.DetectCaptcha(); detected {
-		return fmt.Errorf("检测到%s，需要人工处理", captchaType)
-	}
+	// [已禁用] 检测验证码
+	// if detected, captchaType, _ := c.DetectCaptcha(); detected {
+	// 	return fmt.Errorf("检测到%s，需要人工处理", captchaType)
+	// }
 
-	// 检测反爬
-	if detected, message, _ := c.DetectAntiBot(); detected {
-		return fmt.Errorf("检测到反爬: %s", message)
-	}
+	// [已禁用] 检测反爬
+	// if detected, message, _ := c.DetectAntiBot(); detected {
+	// 	return fmt.Errorf("检测到反爬: %s", message)
+	// }
 
 	return nil
 }
 
-// SafeClick 安全点击（带随机延迟）
+// SafeClick 安全点击（已简化，移除延迟）
 func (c *PooledContext) SafeClick(selector string) error {
 	if c.page == nil {
 		return fmt.Errorf("page not created")
 	}
 
-	c.HumanLikeDelay(300 * time.Millisecond)
+	// [已禁用] 点击前延迟
+	// c.HumanLikeDelay(300 * time.Millisecond)
 
 	if err := c.page.Locator(selector).Click(); err != nil {
 		return err
 	}
 
-	c.HumanLikeDelay(200 * time.Millisecond)
+	// [已禁用] 点击后延迟
+	// c.HumanLikeDelay(200 * time.Millisecond)
 	return nil
 }
 
-// SafeFill 安全填写（模拟人类输入）
+// SafeFill 安全填写（已简化，移除人类输入模拟）
 func (c *PooledContext) SafeFill(selector, text string) error {
 	if c.page == nil {
 		return fmt.Errorf("page not created")
@@ -1414,8 +1420,11 @@ func (c *PooledContext) SafeFill(selector, text string) error {
 		return err
 	}
 
-	// 模拟人类输入
-	return c.HumanLikeTyping(text)
+	// [已禁用] 模拟人类输入，改为直接填充
+	// return c.HumanLikeTyping(text)
+
+	// 直接填充文本
+	return c.page.Locator(selector).Fill(text)
 }
 
 // findLocalChrome 查找本地 Chrome
@@ -1440,4 +1449,16 @@ func findLocalChrome() string {
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
+}
+
+var (
+	defaultPool     *Pool
+	defaultPoolOnce sync.Once
+)
+
+func GetDefaultPool() *Pool {
+	defaultPoolOnce.Do(func() {
+		defaultPool = NewPoolFromConfig()
+	})
+	return defaultPool
 }

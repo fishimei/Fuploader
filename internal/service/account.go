@@ -46,7 +46,6 @@ func (s *AccountService) GetAccountByID(ctx context.Context, id int) (*database.
 }
 
 func (s *AccountService) AddAccount(ctx context.Context, platform string, name string) (*database.Account, error) {
-	// 确保 Cookie 目录存在
 	if err := os.MkdirAll(config.Config.CookiePath, 0755); err != nil {
 		return nil, fmt.Errorf("create cookie directory failed: %w", err)
 	}
@@ -57,17 +56,13 @@ func (s *AccountService) AddAccount(ctx context.Context, platform string, name s
 		Status:   config.AccountStatusInvalid,
 	}
 
-	// 使用事务确保原子性
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		// 创建账号
 		if err := tx.Create(account).Error; err != nil {
 			return fmt.Errorf("create account failed: %w", err)
 		}
 
-		// 设置 Cookie 路径
 		account.CookiePath = filepath.Join(config.Config.CookiePath, fmt.Sprintf("%s_%d.json", platform, account.ID))
 
-		// 更新 Cookie 路径
 		if err := tx.Model(account).Update("cookie_path", account.CookiePath).Error; err != nil {
 			return fmt.Errorf("update cookie path failed: %w", err)
 		}
@@ -108,7 +103,7 @@ func (s *AccountService) ValidateAccount(ctx context.Context, id int) (bool, err
 		return false, fmt.Errorf("account not found")
 	}
 
-	uploader := s.getUploader(account.Platform, account.CookiePath)
+	uploader := s.getUploader(account.Platform, uint(account.ID), account.CookiePath)
 	valid, err := uploader.ValidateCookie(ctx)
 	if err != nil {
 		return false, err
@@ -131,24 +126,20 @@ func (s *AccountService) LoginAccount(ctx context.Context, id int) error {
 		return fmt.Errorf("account not found")
 	}
 
-	// 确保Cookie路径存在，如果为空则自动生成
 	if account.CookiePath == "" {
-		// 确保Cookie目录存在
 		if err := os.MkdirAll(config.Config.CookiePath, 0755); err != nil {
 			return fmt.Errorf("create cookie directory failed: %w", err)
 		}
 		account.CookiePath = s.GetCookiePath(account.Platform, uint(account.ID))
-		// 保存生成的路径
 		if err := s.db.Model(&account).Update("cookie_path", account.CookiePath).Error; err != nil {
 			return fmt.Errorf("update cookie path failed: %w", err)
 		}
 	}
 
-	// 调试日志
 	fmt.Printf("[DEBUG] LoginAccount - AccountID: %d, Platform: %s, CookiePath: %s\n",
 		account.ID, account.Platform, account.CookiePath)
 
-	uploader := s.getUploader(account.Platform, account.CookiePath)
+	uploader := s.getUploader(account.Platform, uint(account.ID), account.CookiePath)
 	if err := uploader.Login(); err != nil {
 		return fmt.Errorf("login failed: %w", err)
 	}
@@ -166,7 +157,6 @@ func (s *AccountService) ReloginAccount(ctx context.Context, id int) error {
 		return fmt.Errorf("account not found")
 	}
 
-	// 确保Cookie路径存在
 	if account.CookiePath == "" {
 		if err := os.MkdirAll(config.Config.CookiePath, 0755); err != nil {
 			return fmt.Errorf("create cookie directory failed: %w", err)
@@ -177,7 +167,6 @@ func (s *AccountService) ReloginAccount(ctx context.Context, id int) error {
 		}
 	}
 
-	// 删除旧Cookie文件（如果存在）
 	if account.CookiePath != "" {
 		if _, err := os.Stat(account.CookiePath); err == nil {
 			if err := os.Remove(account.CookiePath); err != nil {
@@ -186,8 +175,7 @@ func (s *AccountService) ReloginAccount(ctx context.Context, id int) error {
 		}
 	}
 
-	// 执行登录
-	uploader := s.getUploader(account.Platform, account.CookiePath)
+	uploader := s.getUploader(account.Platform, uint(account.ID), account.CookiePath)
 	if err := uploader.Login(); err != nil {
 		return fmt.Errorf("login failed: %w", err)
 	}
@@ -198,12 +186,12 @@ func (s *AccountService) ReloginAccount(ctx context.Context, id int) error {
 	return nil
 }
 
-func (s *AccountService) getUploader(platform string, cookiePath string) types.Uploader {
+func (s *AccountService) getUploader(platform string, accountID uint, cookiePath string) types.Uploader {
 	switch platform {
 	case config.PlatformDouyin:
 		return douyin.NewUploader(cookiePath)
 	case config.PlatformTencent:
-		return tencent.NewUploader(cookiePath)
+		return tencent.NewUploaderWithAccount(accountID)
 	case config.PlatformKuaishou:
 		return kuaishou.NewUploader(cookiePath)
 	case config.PlatformTiktok:
@@ -219,7 +207,6 @@ func (s *AccountService) getUploader(platform string, cookiePath string) types.U
 	}
 }
 
-// GetCookiePath 获取账号的 Cookie 路径
 func (s *AccountService) GetCookiePath(platform string, accountID uint) string {
 	return filepath.Join(config.Config.CookiePath, fmt.Sprintf("%s_%d.json", platform, accountID))
 }

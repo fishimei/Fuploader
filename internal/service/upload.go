@@ -354,7 +354,7 @@ func (s *UploadService) executeTask(ctx context.Context, taskID int) {
 	case config.PlatformDouyin:
 		uploader = douyin.NewUploader(task.Account.CookiePath)
 	case config.PlatformTencent:
-		uploader = tencent.NewUploader(task.Account.CookiePath)
+		uploader = tencent.NewUploaderWithAccount(uint(task.AccountID))
 	case config.PlatformKuaishou:
 		uploader = kuaishou.NewUploader(task.Account.CookiePath)
 	case config.PlatformTiktok:
